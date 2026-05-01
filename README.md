@@ -1,67 +1,91 @@
-# ◈ CamTrack — Multi-Camera Person Tracker
+# ◈ VigilNet — Multi-Camera Person Tracker
 
-## Швидкий старт
+Real-time multi-camera person detection, Re-ID cross-camera tracking, and PTZ auto-follow — all in a single Docker Compose stack.
+
+## Stack
+
+- **Backend:** FastAPI + YOLOv8 + appearance Re-ID + ONVIF PTZ control
+- **Frontend:** React + Vite → served by Nginx
+- **Infra:** Docker Compose, NVIDIA CUDA 12.1, PyTorch GPU
+
+## Quick Start
 
 ```bash
-# 1. Клонуй / розпакуй проект
-cd camtrack-docker
+# 1. Clone the repository
+git clone https://github.com/sorrybodikmain/VigilNet.git
+cd VigilNet
 
-# 2. Заповни .env (тільки цей файл!)
+# 2. Configure your cameras
+cp .env.example .env
 nano .env
 
-# 3. Білд і запуск
+# 3. Build and start
 docker compose up -d --build
 
-# 4. Відкрий браузер
-open http://localhost        # UI конфігуратор
-open http://localhost:8765   # Backend API / live grid
+# 4. Open in browser
+open http://localhost        # Zone configurator UI
+open http://localhost:8765   # Backend API / live stream grid
 ```
 
-## Структура
+## Configuration
+
+All settings live in `.env`. Copy `.env.example` and fill in your camera credentials:
+
+```env
+CAM1_IP=192.168.1.10
+CAM1_USER=admin
+CAM1_PASSWORD=yourpassword
+```
+
+The backend auto-generates `config/camtrack_config.json` from `.env` on first run. You can also configure camera zones visually via the **MAP** tab in the UI.
+
+## Project Structure
 
 ```
-camtrack-docker/
-├── .env                     ← ЗАПОВНИ ЦЕЙ ФАЙЛ
+VigilNet/
+├── .env.example                 ← copy to .env and fill in
 ├── docker-compose.yml
 ├── backend/
-│   ├── Dockerfile           ← nvidia/cuda:12.1 + PyTorch GPU
-│   ├── main.py              ← FastAPI сервер
-│   ├── env_config.py        ← генерує конфіг з .env
-│   ├── config_loader.py     ← читає/пише camtrack_config.json
-│   ├── camera_stream.py     ← RTSP capture (1 thread/camera)
-│   ├── detector.py          ← YOLOv8 person detection
-│   ├── reid.py              ← appearance Re-ID
-│   ├── cross_tracker.py     ← multi-camera tracking
-│   └── ptz_controller.py   ← ONVIF PTZ control
-└── frontend/
-    ├── Dockerfile           ← Vite build → Nginx
-    ├── nginx.conf           ← proxy /api/, /ws/ → backend
-    └── src/App.jsx          ← Zone configurator UI
+│   ├── Dockerfile               ← nvidia/cuda:12.1 + PyTorch GPU
+│   ├── main.py                  ← FastAPI server
+│   ├── env_config.py            ← generates config from .env
+│   ├── config_loader.py         ← reads/writes camtrack_config.json
+│   ├── camera_stream.py         ← RTSP capture (1 thread/camera)
+│   ├── detector.py              ← YOLOv8 person detection
+│   ├── reid.py                  ← appearance Re-ID
+│   ├── cross_tracker.py         ← multi-camera tracking
+│   └── ptz_controller.py        ← ONVIF PTZ control
+├── frontend/
+│   ├── Dockerfile               ← Vite build → Nginx
+│   ├── nginx.conf               ← proxies /api/ and /ws/ to backend
+│   └── src/App.jsx              ← zone configurator UI
+└── config/
+    └── camtrack_config.example.json
 ```
 
 ## Workflow
 
 ```
 1. docker compose up -d --build
-2. Відкрий http://localhost
-3. MAP вкладка → налаштуй зони для кожної камери
-4. Натисни 💾 SAVE & APPLY → backend перезавантажує трекінг
-5. STREAMS вкладка → бачиш live відео з bbox
-6. WebSocket в хедері показує скільки людей відстежується
+2. Open http://localhost
+3. MAP tab → draw coverage zones for each camera
+4. Click SAVE & APPLY → backend reloads tracking config
+5. STREAMS tab → watch live video with bounding boxes
+6. WebSocket counter in the header shows active tracked persons
 ```
 
-## Мережа
+## Networking
 
-- Backend: `network_mode: host` — бачить 192.168.31.* напряму
-- Frontend: bridge → Nginx проксує `/api/` і `/ws/` на `host-gateway:8765`
-- Порти: frontend на `:80`, backend на `:8765`
+- Backend runs with `network_mode: host` — can reach cameras on the local subnet directly
+- Frontend runs in bridge mode — Nginx proxies `/api/` and `/ws/` to `host-gateway:8765`
+- Ports: frontend `:80`, backend `:8765`
 
-## GPU
+## GPU Requirements
 
-Потребує NVIDIA Container Toolkit:
+Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html):
+
 ```bash
-# Встановлення (якщо ще немає)
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
 curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
 curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list \
   | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
@@ -69,48 +93,47 @@ sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
 sudo systemctl restart docker
 ```
 
-## API
+## API Reference
 
-| Endpoint | Метод | Опис |
-|----------|-------|------|
-| `/api/health` | GET | healthcheck |
-| `/api/config` | GET | поточний конфіг |
-| `/api/config` | POST | зберегти новий конфіг |
-| `/api/cameras` | GET | список камер |
-| `/api/tracks` | GET | поточні треки |
-| `/api/stream/{id}` | GET | MJPEG з bbox |
-| `/ws/tracks` | WS | real-time треки |
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/health` | GET | Health check |
+| `/api/config` | GET | Get current config |
+| `/api/config` | POST | Save new config |
+| `/api/cameras` | GET | List cameras |
+| `/api/tracks` | GET | Current tracking data |
+| `/api/stream/{id}` | GET | MJPEG stream with bounding boxes |
+| `/ws/tracks` | WS | Real-time tracking updates |
 
-## iCSee RTSP URL формат
+## iCSee RTSP URL Format
 
 ```
-rtsp://admin:{password}@{ip}:554/stream     # main stream
-rtsp://admin:{password}@{ip}:554/stream2    # sub-stream (рекомендовано для трекінгу)
+rtsp://admin:{password}@{ip}:554/user=admin&password={password}&stream=0.sdp   # 4K main stream
+rtsp://admin:{password}@{ip}:554/user=admin&password={password}&stream=1.sdp   # SD sub-stream (recommended for tracking)
 ```
 
-## ONVIF URL (PTZ)
+## ONVIF PTZ URL
 
 ```
 http://{ip}:80/onvif/device_service
-http://{ip}:8000/onvif/device_service   # деякі моделі
+http://{ip}:8000/onvif/device_service   # some models use port 8000
 ```
 
-## Upgrade Re-ID
+## Upgrading Re-ID
 
-Замін в `reid.py::extract_feature()` на deep model для точності ~95%:
+Replace `extract_feature()` in `reid.py` with a deep model for ~95% accuracy:
 
 ```python
-# torchreid
 import torchreid
 model = torchreid.models.build_model("osnet_x0_25", num_classes=1)
 ```
 
-## Volumes
+## Docker Volumes
 
-| Volume | Вміст |
-|--------|-------|
-| `camtrack_config` | camtrack_config.json (зони, конфіг камер) |
-| `camtrack_models` | YOLOv8 .pt файл (щоб не качати кожен раз) |
+| Volume | Contents |
+|---|---|
+| `camtrack_config` | `camtrack_config.json` — camera zones and tracking config |
+| `camtrack_models` | YOLOv8 `.pt` model file (cached to avoid re-downloading) |
 
 ## Logs
 
@@ -118,3 +141,7 @@ model = torchreid.models.build_model("osnet_x0_25", num_classes=1)
 docker logs camtrack_backend -f
 docker logs camtrack_frontend -f
 ```
+
+## License
+
+MIT
