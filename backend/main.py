@@ -11,6 +11,7 @@ CamTrack Backend
 """
 from __future__ import annotations
 import asyncio, json, logging, os, threading, time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -25,13 +26,23 @@ from env_config     import config_from_env
 from camera_stream  import StreamManager
 from detector       import PersonDetector
 from cross_tracker  import CrossCameraTracker
-from ptz_controller import PTZController
+from ptz_controller import PTZController, SOFT_LOST
 
 logging.basicConfig(
     level   = logging.INFO,
     format  = "%(asctime)s [%(name)s] %(levelname)s %(message)s",
 )
 log = logging.getLogger("camtrack")
+
+HOLD_DURATION = float(os.environ.get("PTZ_HOLD_SECONDS", 30))
+
+# ─── PTZ state machine ────────────────────────────────────────────────────────
+@dataclass
+class PTZState:
+    status:     str   = "idle"   # "idle" | "tracking" | "holding"
+    last_cx:    float = 0.5
+    last_cy:    float = 0.5
+    hold_start: float = 0.0
 
 # ─── Global state ─────────────────────────────────────────────────────────────
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/camtrack_config.json"))
@@ -44,30 +55,50 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
 # Shared mutable state (guarded by _lock)
-_lock               = threading.Lock()
-_config: AppConfig | None         = None
-_streams: StreamManager | None    = None   # 4K — detection
-_streams_sd: StreamManager | None = None   # SD  — MJPEG display
-_detector: PersonDetector|None    = None
-_tracker: CrossCameraTracker|None = None
-_ptz: dict[str, PTZController]    = {}
-_latest: dict                     = {}   # {cam_id: [{id, bbox, cx, cy}]}
-_worker: threading.Thread | None  = None
+_lock                = threading.Lock()
+_config: AppConfig | None          = None
+_streams: StreamManager | None     = None
+_streams_sd: StreamManager | None  = None
+_detector: PersonDetector | None   = None
+_tracker: CrossCameraTracker | None = None
+_ptz: dict[str, PTZController]     = {}
+_ptz_states: dict[str, PTZState]   = {}
+_latest: dict                      = {}
+_worker: threading.Thread | None   = None
 _running        = False
 _frame_count    = 0
 
 # ─── Worker ───────────────────────────────────────────────────────────────────
+def _best_track(tracks: list):
+    """Return the track with the lowest lost count (prefer lost == 0)."""
+    active = [t for t in tracks if t.lost <= SOFT_LOST]
+    if not active:
+        return None
+    return min(active, key=lambda t: t.lost)
+
+
+def _any_neighbor_active(cam_id: str, results: dict) -> bool:
+    """True if any OTHER camera has at least one non-lost track."""
+    for cid, tracks in results.items():
+        if cid == cam_id:
+            continue
+        if any(t.lost <= SOFT_LOST for t in tracks):
+            return True
+    return False
+
+
 def _processing_loop():
-    global _frame_count, _latest, _running
+    global _frame_count, _latest, _running, _ptz_states
     log.info("Processing loop started")
     while _running:
         _frame_count += 1
         with _lock:
-            cfg     = _config
-            streams = _streams
-            det     = _detector
-            trk     = _tracker
-            ptz     = dict(_ptz)
+            cfg        = _config
+            streams    = _streams
+            det        = _detector
+            trk        = _tracker
+            ptz        = dict(_ptz)
+            ptz_states = dict(_ptz_states)
         if not cfg or not streams or not det or not trk:
             time.sleep(0.05); continue
         if _frame_count % cfg.tracking.frame_skip != 0:
@@ -82,19 +113,74 @@ def _processing_loop():
         results = trk.update(dets_per_cam)
 
         output: dict = {}
+        new_states: dict[str, PTZState] = {}
+
         for cam in cfg.cameras:
+            cam_tracks = results.get(cam.id, [])
             cam_out = []
-            for t in results.get(cam.id, []):
+            for t in cam_tracks:
                 gid = trk.get_global_id(cam.id, t.track_id)
                 cam_out.append({"id": gid or t.track_id,
                                 "bbox": list(t.bbox),
                                 "cx": t.cx, "cy": t.cy})
-                if cam.type == "ptz" and t.lost == 0:
-                    ctrl = ptz.get(cam.id)
-                    if ctrl:
-                        ctrl.track_person(t.cx, t.cy)
             output[cam.id] = cam_out
 
+            if cam.type != "ptz":
+                continue
+
+            ctrl  = ptz.get(cam.id)
+            state = ptz_states.get(cam.id, PTZState())
+            best  = _best_track(cam_tracks)
+            now   = time.time()
+
+            if best is not None:
+                # ── TRACKING ──────────────────────────────────────────────────
+                if state.status != "tracking":
+                    log.info(f"[{cam.id}] PTZ → TRACKING")
+                state.status  = "tracking"
+                state.last_cx = best.cx
+                state.last_cy = best.cy
+                if ctrl:
+                    ctrl.track_person(best.cx, best.cy)
+
+            elif state.status == "tracking":
+                # ── TRACKING → HOLDING ────────────────────────────────────────
+                log.info(f"[{cam.id}] PTZ → HOLDING (last pos {state.last_cx:.2f},{state.last_cy:.2f})")
+                state.status     = "holding"
+                state.hold_start = now
+                if ctrl:
+                    ctrl.stop()
+
+            elif state.status == "holding":
+                # ── HOLDING — check exit conditions ───────────────────────────
+                elapsed         = now - state.hold_start
+                neighbor_active = _any_neighbor_active(cam.id, results)
+                if elapsed >= HOLD_DURATION or neighbor_active:
+                    reason = "timeout" if elapsed >= HOLD_DURATION else "neighbor active"
+                    log.info(f"[{cam.id}] PTZ → IDLE ({reason})")
+                    state.status = "idle"
+                    if ctrl:
+                        ctrl.go_home()
+
+            new_states[cam.id] = state
+
+        with _lock:
+            _ptz_states = new_states
+
+        states_out: dict[str, dict] = {}
+        for cam_id, st in new_states.items():
+            hold_remaining = None
+            if st.status == "holding":
+                elapsed = time.time() - st.hold_start
+                hold_remaining = max(0.0, round(HOLD_DURATION - elapsed, 1))
+            states_out[cam_id] = {
+                "status":         st.status,
+                "last_cx":        round(st.last_cx, 3),
+                "last_cy":        round(st.last_cy, 3),
+                "hold_remaining": hold_remaining,
+            }
+
+        output["_states"] = states_out
         _latest = output
         time.sleep(0.01)
     log.info("Processing loop stopped")
@@ -102,7 +188,8 @@ def _processing_loop():
 
 def _start_tracking(cfg: AppConfig):
     """(Re)initialize all tracking components from a new config."""
-    global _streams, _streams_sd, _detector, _tracker, _ptz, _worker, _running, _config
+    global _streams, _streams_sd, _detector, _tracker, _ptz, _ptz_states, \
+           _worker, _running, _config
 
     _running = False
     if _worker and _worker.is_alive():
@@ -139,6 +226,8 @@ def _start_tracking(cfg: AppConfig):
                 new_ptz[cam.id] = PTZController(cam, cfg.tracking.ptz_smoothing_factor)
         _ptz = new_ptz
 
+        _ptz_states = {cam.id: PTZState() for cam in cfg.cameras if cam.type == "ptz"}
+
     _running = True
     _worker  = threading.Thread(target=_processing_loop, daemon=True)
     _worker.start()
@@ -151,7 +240,6 @@ async def startup():
     MODEL_CACHE.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # Pre-download YOLO model if needed
     import os as _os
     _os.environ["YOLO_CONFIG_DIR"] = str(MODEL_CACHE)
 
@@ -225,7 +313,6 @@ async def save_config(payload: ConfigPayload):
     log.info("Config saved — reloading tracking...")
 
     cfg = load_cfg(CONFIG_PATH)
-    # Run reinit in thread so we don't block the response
     threading.Thread(target=_start_tracking, args=(cfg,), daemon=True).start()
     return {"status": "ok", "cameras": len(cfg.cameras)}
 
@@ -247,11 +334,13 @@ def mjpeg_stream(camera_id: str):
                 time.sleep(0.05); continue
 
             img = fr.image.copy()
-            for det in _latest.get(camera_id, []):
-                x1,y1,x2,y2 = det["bbox"]
-                cv2.rectangle(img, (x1,y1), (x2,y2), (0,208,132), 2)
-                cv2.putText(img, f"#{det['id']}", (x1, max(0,y1-6)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,208,132), 1)
+            cam_data = _latest.get(camera_id, [])
+            if isinstance(cam_data, list):
+                for det in cam_data:
+                    x1,y1,x2,y2 = det["bbox"]
+                    cv2.rectangle(img, (x1,y1), (x2,y2), (0,208,132), 2)
+                    cv2.putText(img, f"#{det['id']}", (x1, max(0,y1-6)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,208,132), 1)
 
             ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:

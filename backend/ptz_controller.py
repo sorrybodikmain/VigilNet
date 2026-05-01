@@ -9,6 +9,8 @@ from config_loader import CameraConfig
 
 log = logging.getLogger(__name__)
 
+SOFT_LOST = 3
+
 class PTZController:
     def __init__(self, cam: CameraConfig, smoothing: float = 0.3):
         self.cam       = cam
@@ -65,12 +67,17 @@ class PTZController:
         except Exception as e:
             log.debug(f"[{self.cam.name}] PTZ move: {e}")
 
-    def _stop(self):
+    def stop(self):
+        if self._ptz is None:
+            return
         try:
             with self._lock:
                 self._ptz.Stop({"ProfileToken": self._profile.token,
                                 "PanTilt": True, "Zoom": False})
         except: pass
+
+    def _stop(self):
+        self.stop()
 
     def go_home(self):
         if self._ptz and self._profile:

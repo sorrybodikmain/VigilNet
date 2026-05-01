@@ -54,13 +54,14 @@ camtrack-docker/
 
 ## Мережа
 
-- Backend: `network_mode: host` — бачить 192.168.31.* напряму
+- Backend: `network_mode: host` — бачить 192.168.31.\* напряму
 - Frontend: bridge → Nginx проксує `/api/` і `/ws/` на `host-gateway:8765`
 - Порти: frontend на `:80`, backend на `:8765`
 
 ## GPU
 
 Потребує NVIDIA Container Toolkit:
+
 ```bash
 # Встановлення (якщо ще немає)
 distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
@@ -73,15 +74,15 @@ sudo systemctl restart docker
 
 ## API
 
-| Endpoint | Метод | Опис |
-|----------|-------|------|
-| `/api/health` | GET | healthcheck |
-| `/api/config` | GET | поточний конфіг |
-| `/api/config` | POST | зберегти новий конфіг |
-| `/api/cameras` | GET | список камер |
-| `/api/tracks` | GET | поточні треки |
-| `/api/stream/{id}` | GET | MJPEG з bbox |
-| `/ws/tracks` | WS | real-time треки |
+| Endpoint           | Метод | Опис                  |
+| ------------------ | ----- | --------------------- |
+| `/api/health`      | GET   | healthcheck           |
+| `/api/config`      | GET   | поточний конфіг       |
+| `/api/config`      | POST  | зберегти новий конфіг |
+| `/api/cameras`     | GET   | список камер          |
+| `/api/tracks`      | GET   | поточні треки         |
+| `/api/stream/{id}` | GET   | MJPEG з bbox          |
+| `/ws/tracks`       | WS    | real-time треки       |
 
 ## iCSee RTSP URL формат
 
@@ -109,8 +110,8 @@ model = torchreid.models.build_model("osnet_x0_25", num_classes=1)
 
 ## Volumes
 
-| Volume | Вміст |
-|--------|-------|
+| Volume            | Вміст                                     |
+| ----------------- | ----------------------------------------- |
 | `camtrack_config` | camtrack_config.json (зони, конфіг камер) |
 | `camtrack_models` | YOLOv8 .pt файл (щоб не качати кожен раз) |
 
