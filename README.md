@@ -1,6 +1,10 @@
 # ◈ VigilNet — Multi-Camera Person Tracker
 
+> Ukrainian version: [README-UA.md](./README-UA.md)
+
 Real-time multi-camera person detection, Re-ID cross-camera tracking, and PTZ auto-follow — all in a single Docker Compose stack.
+
+Built and tested with **iCSee PTZ cameras** (models: `IPG-X2-WEQ2`, `X6C-WEQ`). Should work with any RTSP + ONVIF-compatible camera.
 
 ## Stack
 

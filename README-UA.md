@@ -1,4 +1,6 @@
-# ◈ CamTrack — Multi-Camera Person Tracker
+# ◈ VigilNet — Multi-Camera Person Tracker
+
+Створено та протестовано з PTZ-камерами **iCSee** (моделі: `IPG-X2-WEQ2`, `X6C-WEQ`). Має працювати з будь-якою камерою, що підтримує RTSP + ONVIF.
 
 ## Швидкий старт
 
