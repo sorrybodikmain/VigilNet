@@ -1,0 +1,26 @@
+# Environment — contains credentials, never commit
+.env
+
+# Runtime config — generated from .env, contains RTSP URLs with credentials
+config/camtrack_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node / frontend build artifacts
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Docker volumes / model cache
+*.pt
+models/
+
+# OS
+.DS_Store
+Thumbs.db
