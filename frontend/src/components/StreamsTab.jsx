@@ -1,6 +1,7 @@
 import { styles } from "../styles.js";
 import { CAM_COLORS, STATE_COLOR } from "../constants.js";
 import { StateBadge } from "./ui.jsx";
+import { PtzJoystick } from "./PtzJoystick.jsx";
 
 export function StreamsTab({ cameras, tracks, ptzStates }) {
   return (
@@ -42,6 +43,14 @@ export function StreamsTab({ cameras, tracks, ptzStates }) {
                   <div style={styles.streamNoTrack}>Очікування детекції...</div>
                 )}
               </div>
+
+              {cam.type === "ptz" && (
+                <PtzJoystick
+                  camId={cam.id}
+                  isManual={st?.manual}
+                  manualRemaining={st?.manual_remaining}
+                />
+              )}
 
               <div style={styles.streamFooter}>
                 {camTracks.map(t => (

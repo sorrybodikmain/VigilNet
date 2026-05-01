@@ -34,7 +34,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("camtrack")
 
-HOLD_DURATION = float(os.environ.get("PTZ_HOLD_SECONDS", 30))
+HOLD_DURATION           = float(os.environ.get("PTZ_HOLD_SECONDS", 30))
+MANUAL_OVERRIDE_TIMEOUT = float(os.environ.get("PTZ_MANUAL_TIMEOUT", 15))
 
 # ─── PTZ state machine ────────────────────────────────────────────────────────
 @dataclass
@@ -63,6 +64,7 @@ _detector: PersonDetector | None   = None
 _tracker: CrossCameraTracker | None = None
 _ptz: dict[str, PTZController]     = {}
 _ptz_states: dict[str, PTZState]   = {}
+_manual_override: dict[str, float] = {}
 _latest: dict                      = {}
 _worker: threading.Thread | None   = None
 _running        = False
@@ -133,34 +135,37 @@ def _processing_loop():
             best  = _best_track(cam_tracks)
             now   = time.time()
 
-            if best is not None:
-                # ── TRACKING ──────────────────────────────────────────────────
-                if state.status != "tracking":
-                    log.info(f"[{cam.id}] PTZ → TRACKING")
-                state.status  = "tracking"
-                state.last_cx = best.cx
-                state.last_cy = best.cy
-                if ctrl:
-                    ctrl.track_person(best.cx, best.cy)
+            is_manual = (now - _manual_override.get(cam.id, 0)) < MANUAL_OVERRIDE_TIMEOUT
 
-            elif state.status == "tracking":
-                # ── TRACKING → HOLDING ────────────────────────────────────────
-                log.info(f"[{cam.id}] PTZ → HOLDING (last pos {state.last_cx:.2f},{state.last_cy:.2f})")
-                state.status     = "holding"
-                state.hold_start = now
-                if ctrl:
-                    ctrl.stop()
-
-            elif state.status == "holding":
-                # ── HOLDING — check exit conditions ───────────────────────────
-                elapsed         = now - state.hold_start
-                neighbor_active = _any_neighbor_active(cam.id, results)
-                if elapsed >= HOLD_DURATION or neighbor_active:
-                    reason = "timeout" if elapsed >= HOLD_DURATION else "neighbor active"
-                    log.info(f"[{cam.id}] PTZ → IDLE ({reason})")
-                    state.status = "idle"
+            if not is_manual:
+                if best is not None:
+                    # ── TRACKING ──────────────────────────────────────────────
+                    if state.status != "tracking":
+                        log.info(f"[{cam.id}] PTZ → TRACKING")
+                    state.status  = "tracking"
+                    state.last_cx = best.cx
+                    state.last_cy = best.cy
                     if ctrl:
-                        ctrl.go_home()
+                        ctrl.track_person(best.cx, best.cy)
+
+                elif state.status == "tracking":
+                    # ── TRACKING → HOLDING ────────────────────────────────────
+                    log.info(f"[{cam.id}] PTZ → HOLDING (last pos {state.last_cx:.2f},{state.last_cy:.2f})")
+                    state.status     = "holding"
+                    state.hold_start = now
+                    if ctrl:
+                        ctrl.stop()
+
+                elif state.status == "holding":
+                    # ── HOLDING — check exit conditions ───────────────────────
+                    elapsed         = now - state.hold_start
+                    neighbor_active = _any_neighbor_active(cam.id, results)
+                    if elapsed >= HOLD_DURATION or neighbor_active:
+                        reason = "timeout" if elapsed >= HOLD_DURATION else "neighbor active"
+                        log.info(f"[{cam.id}] PTZ → IDLE ({reason})")
+                        state.status = "idle"
+                        if ctrl:
+                            ctrl.go_home()
 
             new_states[cam.id] = state
 
@@ -169,15 +174,21 @@ def _processing_loop():
 
         states_out: dict[str, dict] = {}
         for cam_id, st in new_states.items():
+            now_s = time.time()
             hold_remaining = None
             if st.status == "holding":
-                elapsed = time.time() - st.hold_start
+                elapsed = now_s - st.hold_start
                 hold_remaining = max(0.0, round(HOLD_DURATION - elapsed, 1))
+            manual_elapsed  = now_s - _manual_override.get(cam_id, 0)
+            is_manual_out   = manual_elapsed < MANUAL_OVERRIDE_TIMEOUT
+            manual_remaining = round(MANUAL_OVERRIDE_TIMEOUT - manual_elapsed, 1) if is_manual_out else None
             states_out[cam_id] = {
-                "status":         st.status,
-                "last_cx":        round(st.last_cx, 3),
-                "last_cy":        round(st.last_cy, 3),
-                "hold_remaining": hold_remaining,
+                "status":           st.status,
+                "last_cx":          round(st.last_cx, 3),
+                "last_cy":          round(st.last_cy, 3),
+                "hold_remaining":   hold_remaining,
+                "manual":           is_manual_out,
+                "manual_remaining": manual_remaining,
             }
 
         output["_states"] = states_out
@@ -320,6 +331,33 @@ async def save_config(payload: ConfigPayload):
 @app.get("/api/tracks")
 def get_tracks():
     return _latest
+
+
+# ─── Manual PTZ control ───────────────────────────────────────────────────────
+class PtzMoveBody(BaseModel):
+    pan:  float = 0.0
+    tilt: float = 0.0
+    zoom: float = 0.0
+
+
+@app.post("/api/ptz/{camera_id}/move")
+def ptz_move(camera_id: str, body: PtzMoveBody):
+    ctrl = _ptz.get(camera_id)
+    if ctrl is None:
+        return JSONResponse({"error": "no PTZ controller for this camera"}, status_code=404)
+    _manual_override[camera_id] = time.time()
+    ctrl.move(body.pan, body.tilt, body.zoom)
+    return {"status": "ok"}
+
+
+@app.post("/api/ptz/{camera_id}/stop")
+def ptz_stop(camera_id: str):
+    ctrl = _ptz.get(camera_id)
+    if ctrl is None:
+        return JSONResponse({"error": "no PTZ controller for this camera"}, status_code=404)
+    _manual_override[camera_id] = time.time()
+    ctrl.stop()
+    return {"status": "ok"}
 
 
 # ─── MJPEG streams ────────────────────────────────────────────────────────────
