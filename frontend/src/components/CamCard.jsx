@@ -55,6 +55,23 @@ export function CamCard({ cam, color, tracks, ptzState, onUpdate, onPtz, onDelet
                 <option value="ptz">PTZ</option>
               </select>
             </div>
+            <div style={{ gridColumn:"1/-1", display:"flex", alignItems:"center", gap:8 }}>
+              <label style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", userSelect:"none" }}>
+                <input
+                  type="checkbox"
+                  checked={!!cam.split_stream}
+                  onChange={e => onUpdate("split_stream", e.target.checked)}
+                  style={{ accentColor:"#00d084", width:12, height:12 }}
+                />
+                <span style={{ fontSize:10, color:"#6a8292", letterSpacing:1 }}>SPLIT STREAM</span>
+              </label>
+              {cam.split_stream && (
+                <span style={{ fontSize:9, color:"#00d084", background:"#00d08415",
+                  border:"1px solid #00d08440", padding:"1px 6px", letterSpacing:1 }}>
+                  ↑ FIXED  /  ↓ PTZ
+                </span>
+              )}
+            </div>
             {cam.type === "ptz" && (
               <div style={{ gridColumn:"1/-1" }}>
                 <div style={styles.miniLabel}>ONVIF URL</div>

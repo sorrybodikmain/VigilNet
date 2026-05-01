@@ -39,6 +39,7 @@ export function makeCameraTemplate(idx, yardW, yardH) {
     rtsp_sd: `rtsp://admin:pass@${ip}/user=admin&password=pass&stream=1.sdp`,
     ip,
     type: "ptz",
+    split_stream: false,
     onvif_url: `http://admin:pass@${ip}:80/onvif/device_service`,
     position_m: { x: yardW / 2, y: yardH / 2 },
     position:   { x: yardW / 2, y: yardH / 2 },

@@ -97,17 +97,33 @@ sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
 sudo systemctl restart docker
 ```
 
+## Split Stream (Dual-Sensor Cameras)
+
+Some cameras output a single vertical RTSP stream where the **top half is a fixed wide-angle lens** and the **bottom half is a PTZ lens**. Enable this per-camera with `split_stream: true` in `camtrack_config.json` or via the checkbox in the **CAMERAS** tab of the UI.
+
+When enabled:
+- One physical RTSP connection is opened (no bandwidth duplication)
+- The frame is split at `height / 2` — top half → `{id}_top` (fixed), bottom half → `{id}_bot` (PTZ)
+- YOLO detection and Re-ID tracking run independently on each half
+- PTZ auto-follow is driven by detections in the bottom half
+- The **STREAMS** tab shows both sub-streams side-by-side in a single card
+- MJPEG endpoints: `/api/stream/{id}_top`, `/api/stream/{id}_bot`, `/api/stream/{id}` (full frame with divider)
+
+> **⚠️ Work in progress** — split stream support is not yet fully production-ready. Known limitations: zone drawing on the MAP tab does not account for the coordinate offset of each half; Re-ID handoff between split halves of the same camera is not yet tuned.
+
 ## API Reference
 
-| Endpoint           | Method | Description                      |
-| ------------------ | ------ | -------------------------------- |
-| `/api/health`      | GET    | Health check                     |
-| `/api/config`      | GET    | Get current config               |
-| `/api/config`      | POST   | Save new config                  |
-| `/api/cameras`     | GET    | List cameras                     |
-| `/api/tracks`      | GET    | Current tracking data            |
-| `/api/stream/{id}` | GET    | MJPEG stream with bounding boxes |
-| `/ws/tracks`       | WS     | Real-time tracking updates       |
+| Endpoint                  | Method | Description                              |
+| ------------------------- | ------ | ---------------------------------------- |
+| `/api/health`             | GET    | Health check                             |
+| `/api/config`             | GET    | Get current config                       |
+| `/api/config`             | POST   | Save new config                          |
+| `/api/cameras`            | GET    | List cameras                             |
+| `/api/tracks`             | GET    | Current tracking data                    |
+| `/api/stream/{id}`        | GET    | MJPEG stream with bounding boxes         |
+| `/api/stream/{id}_top`    | GET    | MJPEG — top half of a split-stream camera |
+| `/api/stream/{id}_bot`    | GET    | MJPEG — bottom half of a split-stream camera |
+| `/ws/tracks`              | WS     | Real-time tracking updates               |
 
 ## iCSee RTSP URL Format
 

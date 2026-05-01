@@ -72,17 +72,33 @@ sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
 sudo systemctl restart docker
 ```
 
+## Split Stream (камери з подвійною оптикою)
+
+Деякі камери виводять один вертикальний RTSP потік, де **верхня половина — фіксована ширококутна лінза**, а **нижня — PTZ лінза**. Увімкнути для конкретної камери можна через `split_stream: true` у `camtrack_config.json` або через чекбокс у вкладці **CAMERAS** в UI.
+
+Коли увімкнено:
+- Відкривається одне фізичне RTSP з'єднання (без дублювання трафіку)
+- Кадр ділиться по `height / 2` — верхня половина → `{id}_top` (fixed), нижня → `{id}_bot` (PTZ)
+- YOLO та Re-ID трекінг працюють незалежно на кожній половині
+- PTZ auto-follow керується детекціями з нижньої половини
+- Вкладка **STREAMS** показує обидва суб-потоки поруч в одній картці
+- MJPEG ендпоінти: `/api/stream/{id}_top`, `/api/stream/{id}_bot`, `/api/stream/{id}` (повний кадр з роздільником)
+
+> **⚠️ У розробці** — функція split stream ще не повністю готова до продакшну. Відомі обмеження: малювання зон у вкладці MAP не враховує зміщення координат кожної половини; Re-ID handoff між половинами однієї фізичної камери ще не налаштований.
+
 ## API
 
-| Endpoint           | Метод | Опис                  |
-| ------------------ | ----- | --------------------- |
-| `/api/health`      | GET   | healthcheck           |
-| `/api/config`      | GET   | поточний конфіг       |
-| `/api/config`      | POST  | зберегти новий конфіг |
-| `/api/cameras`     | GET   | список камер          |
-| `/api/tracks`      | GET   | поточні треки         |
-| `/api/stream/{id}` | GET   | MJPEG з bbox          |
-| `/ws/tracks`       | WS    | real-time треки       |
+| Endpoint                  | Метод | Опис                                 |
+| ------------------------- | ----- | ------------------------------------ |
+| `/api/health`             | GET   | healthcheck                          |
+| `/api/config`             | GET   | поточний конфіг                      |
+| `/api/config`             | POST  | зберегти новий конфіг                |
+| `/api/cameras`            | GET   | список камер                         |
+| `/api/tracks`             | GET   | поточні треки                        |
+| `/api/stream/{id}`        | GET   | MJPEG з bbox                         |
+| `/api/stream/{id}_top`    | GET   | MJPEG — верхня половина split-камери |
+| `/api/stream/{id}_bot`    | GET   | MJPEG — нижня половина split-камери  |
+| `/ws/tracks`              | WS    | real-time треки                      |
 
 ## iCSee RTSP URL формат
 

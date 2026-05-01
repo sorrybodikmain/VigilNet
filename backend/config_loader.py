@@ -26,7 +26,8 @@ class CameraConfig:
     position_m:      dict             # {x, y}
     zone_polygon_m:  list             # [{x,y}, ...]
     ptz_limits:      Optional[PTZLimits]
-    color:           str = "#00d084"
+    color:           str  = "#00d084"
+    split_stream:    bool = False     # top half = fixed, bottom half = ptz
 
 
 @dataclass
@@ -66,6 +67,7 @@ def load(path: str | Path) -> AppConfig:
             zone_polygon_m = c.get("zone_polygon_m", []),
             ptz_limits     = ptz,
             color          = c.get("color", "#00d084"),
+            split_stream   = c.get("split_stream", False),
         ))
 
     tr = data.get("tracking", {})
@@ -98,6 +100,7 @@ def config_to_dict(cfg: AppConfig) -> dict:
             "zone_polygon_m": c.zone_polygon_m,
             "ptz_limits":     asdict(c.ptz_limits) if c.ptz_limits else None,
             "color":          c.color,
+            "split_stream":   c.split_stream,
         })
     return {
         "version": "1.0",

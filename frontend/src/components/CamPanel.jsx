@@ -38,6 +38,23 @@ export function CamPanel({ cam, color, ptzState, onUpdate, onPtz, onDelete }) {
           <option value="ptz">PTZ (Pan-Tilt-Zoom)</option>
         </select>
       </Fld>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <label style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", userSelect:"none" }}>
+          <input
+            type="checkbox"
+            checked={!!cam.split_stream}
+            onChange={e => onUpdate("split_stream", e.target.checked)}
+            style={{ accentColor:"#00d084", width:12, height:12 }}
+          />
+          <span style={{ fontSize:10, color:"#6a8292", letterSpacing:1 }}>SPLIT STREAM</span>
+        </label>
+        {cam.split_stream && (
+          <span style={{ fontSize:9, color:"#00d084", background:"#00d08415",
+            border:"1px solid #00d08440", padding:"1px 6px", letterSpacing:1 }}>
+            ↑ FIXED / ↓ PTZ
+          </span>
+        )}
+      </div>
       <Fld label="IP">
         <input value={cam.ip} onChange={e => onUpdate("ip", e.target.value)} style={styles.inp}/>
       </Fld>

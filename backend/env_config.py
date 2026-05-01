@@ -60,6 +60,7 @@ def config_from_env() -> AppConfig:
             "y": float(os.environ.get(f"{p}_POS_Y", default_pos["y"])),
         }
 
+        split = os.environ.get(f"{p}_SPLIT_STREAM", "false").lower() == "true"
         cameras.append(CameraConfig(
             id=f"cam{i}", name=name, type=cam_type,
             rtsp_4k=rtsp_4k, rtsp_sd=rtsp_sd,
@@ -67,6 +68,7 @@ def config_from_env() -> AppConfig:
             position_m=position, zone_polygon_m=[],
             ptz_limits=PTZLimits() if cam_type=="ptz" else None,
             color=_COLORS[(i-1) % len(_COLORS)],
+            split_stream=split,
         ))
         i += 1
 

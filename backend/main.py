@@ -5,7 +5,7 @@ CamTrack Backend
   GET  /api/config        — поточний конфіг (JSON)
   POST /api/config        — зберегти новий конфіг і перезапустити трекінг
   GET  /api/tracks        — поточні треки
-  GET  /api/stream/{id}   — MJPEG стрім з bbox
+  GET  /api/stream/{id}   — MJPEG стрім з bbox (підтримує {id}_top / {id}_bot для split-камер)
   WS   /ws/tracks         — real-time треки
   GET  /                  — live grid
 """
@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
-from config_loader  import load as load_cfg, AppConfig, config_to_dict
+from config_loader  import load as load_cfg, AppConfig, CameraConfig, config_to_dict
 from env_config     import config_from_env
 from camera_stream  import StreamManager
 from detector       import PersonDetector
@@ -55,7 +55,6 @@ app = FastAPI(title="CamTrack", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
-# Shared mutable state (guarded by _lock)
 _lock                = threading.Lock()
 _config: AppConfig | None          = None
 _streams: StreamManager | None     = None
@@ -70,24 +69,78 @@ _worker: threading.Thread | None   = None
 _running        = False
 _frame_count    = 0
 
-# ─── Worker ───────────────────────────────────────────────────────────────────
+
+# ─── Split-stream helpers ──────────────────────────────────────────────────────
+
+def _split_id(camera_id: str) -> tuple[str, str | None]:
+    """Parse '{cam_id}_top' / '{cam_id}_bot' → (physical_id, 'top'/'bot'/None)."""
+    if camera_id.endswith("_top"):
+        return camera_id[:-4], "top"
+    if camera_id.endswith("_bot"):
+        return camera_id[:-4], "bot"
+    return camera_id, None
+
+
+def _expand_cameras(cameras: list[CameraConfig]) -> list[CameraConfig]:
+    """
+    For CrossCameraTracker: expand split cameras into virtual sub-cam configs.
+    Physical RTSP streams are NOT duplicated — only tracking IDs are expanded.
+    """
+    result = []
+    for cam in cameras:
+        if cam.split_stream:
+            result.append(CameraConfig(
+                id=f"{cam.id}_top", name=f"{cam.name} ↑",
+                type="fixed",
+                rtsp_4k=cam.rtsp_4k, rtsp_sd=cam.rtsp_sd,
+                ip=cam.ip, onvif_url=None,
+                position_m=cam.position_m, zone_polygon_m=[],
+                ptz_limits=None, color=cam.color, split_stream=False,
+            ))
+            result.append(CameraConfig(
+                id=f"{cam.id}_bot", name=f"{cam.name} ↓",
+                type=cam.type,
+                rtsp_4k=cam.rtsp_4k, rtsp_sd=cam.rtsp_sd,
+                ip=cam.ip, onvif_url=cam.onvif_url,
+                position_m=cam.position_m, zone_polygon_m=[],
+                ptz_limits=cam.ptz_limits, color=cam.color, split_stream=False,
+            ))
+        else:
+            result.append(cam)
+    return result
+
+
+# ─── Worker helpers ───────────────────────────────────────────────────────────
+
 def _best_track(tracks: list):
-    """Return the track with the lowest lost count (prefer lost == 0)."""
     active = [t for t in tracks if t.lost <= SOFT_LOST]
     if not active:
         return None
     return min(active, key=lambda t: t.lost)
 
 
-def _any_neighbor_active(cam_id: str, results: dict) -> bool:
-    """True if any OTHER camera has at least one non-lost track."""
-    for cid, tracks in results.items():
-        if cid == cam_id:
+def _any_neighbor_active(cam_id: str, results: dict, cfg: AppConfig) -> bool:
+    """True if any OTHER physical camera has at least one non-lost track."""
+    for cam in cfg.cameras:
+        if cam.id == cam_id:
             continue
-        if any(t.lost <= SOFT_LOST for t in tracks):
-            return True
+        check_ids = ([f"{cam.id}_top", f"{cam.id}_bot"]
+                     if cam.split_stream else [cam.id])
+        for cid in check_ids:
+            if any(t.lost <= SOFT_LOST for t in results.get(cid, [])):
+                return True
     return False
 
+
+def _draw_det(img, det, color=(0, 208, 132), offset_y: int = 0):
+    x1, y1, x2, y2 = det["bbox"]
+    y1 += offset_y; y2 += offset_y
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+    cv2.putText(img, f"#{det['id']}", (x1, max(0, y1 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+
+
+# ─── Processing loop ──────────────────────────────────────────────────────────
 
 def _processing_loop():
     global _frame_count, _latest, _running, _ptz_states
@@ -107,67 +160,131 @@ def _processing_loop():
             time.sleep(0.01); continue
 
         frames = streams.all_frames()
-        dets_per_cam = {}
+
+        # ── Detection ─────────────────────────────────────────────────────────
+        dets_per_cam: dict = {}
         for cam in cfg.cameras:
             fr = frames.get(cam.id)
-            dets_per_cam[cam.id] = det.detect(fr.image, extract_crops=True) if fr else []
+            if not fr:
+                if cam.split_stream:
+                    dets_per_cam[f"{cam.id}_top"] = []
+                    dets_per_cam[f"{cam.id}_bot"] = []
+                else:
+                    dets_per_cam[cam.id] = []
+                continue
+
+            if cam.split_stream:
+                h   = fr.image.shape[0]
+                mid = h // 2
+                dets_per_cam[f"{cam.id}_top"] = det.detect(fr.image[:mid, :], extract_crops=True)
+                dets_per_cam[f"{cam.id}_bot"] = det.detect(fr.image[mid:, :], extract_crops=True)
+            else:
+                dets_per_cam[cam.id] = det.detect(fr.image, extract_crops=True)
 
         results = trk.update(dets_per_cam)
 
+        # ── Output + PTZ state machine ─────────────────────────────────────────
         output: dict = {}
         new_states: dict[str, PTZState] = {}
 
         for cam in cfg.cameras:
-            cam_tracks = results.get(cam.id, [])
-            cam_out = []
-            for t in cam_tracks:
-                gid = trk.get_global_id(cam.id, t.track_id)
-                cam_out.append({"id": gid or t.track_id,
-                                "bbox": list(t.bbox),
-                                "cx": t.cx, "cy": t.cy})
-            output[cam.id] = cam_out
+            now = time.time()
 
-            if cam.type != "ptz":
-                continue
+            if cam.split_stream:
+                # ── Emit tracks for both virtual halves ────────────────────────
+                for suffix in ("_top", "_bot"):
+                    virt_id    = cam.id + suffix
+                    cam_tracks = results.get(virt_id, [])
+                    output[virt_id] = [
+                        {"id":   trk.get_global_id(virt_id, t.track_id) or t.track_id,
+                         "bbox": list(t.bbox), "cx": t.cx, "cy": t.cy}
+                        for t in cam_tracks
+                    ]
 
-            ctrl  = ptz.get(cam.id)
-            state = ptz_states.get(cam.id, PTZState())
-            best  = _best_track(cam_tracks)
-            now   = time.time()
+                if cam.type != "ptz":
+                    continue
 
-            is_manual = (now - _manual_override.get(cam.id, 0)) < MANUAL_OVERRIDE_TIMEOUT
+                # ── PTZ logic driven by bottom-half detections ─────────────────
+                bot_tracks = results.get(f"{cam.id}_bot", [])
+                ctrl       = ptz.get(cam.id)
+                state      = ptz_states.get(cam.id, PTZState())
+                best       = _best_track(bot_tracks)
+                is_manual  = (now - _manual_override.get(cam.id, 0)) < MANUAL_OVERRIDE_TIMEOUT
 
-            if not is_manual:
-                if best is not None:
-                    # ── TRACKING ──────────────────────────────────────────────
-                    if state.status != "tracking":
-                        log.info(f"[{cam.id}] PTZ → TRACKING")
-                    state.status  = "tracking"
-                    state.last_cx = best.cx
-                    state.last_cy = best.cy
-                    if ctrl:
-                        ctrl.track_person(best.cx, best.cy)
-
-                elif state.status == "tracking":
-                    # ── TRACKING → HOLDING ────────────────────────────────────
-                    log.info(f"[{cam.id}] PTZ → HOLDING (last pos {state.last_cx:.2f},{state.last_cy:.2f})")
-                    state.status     = "holding"
-                    state.hold_start = now
-                    if ctrl:
-                        ctrl.stop()
-
-                elif state.status == "holding":
-                    # ── HOLDING — check exit conditions ───────────────────────
-                    elapsed         = now - state.hold_start
-                    neighbor_active = _any_neighbor_active(cam.id, results)
-                    if elapsed >= HOLD_DURATION or neighbor_active:
-                        reason = "timeout" if elapsed >= HOLD_DURATION else "neighbor active"
-                        log.info(f"[{cam.id}] PTZ → IDLE ({reason})")
-                        state.status = "idle"
+                if not is_manual:
+                    if best is not None:
+                        if state.status != "tracking":
+                            log.info(f"[{cam.id}] PTZ → TRACKING (split)")
+                        state.status  = "tracking"
+                        state.last_cx = best.cx
+                        state.last_cy = best.cy
                         if ctrl:
-                            ctrl.go_home()
+                            ctrl.track_person(best.cx, best.cy)
 
-            new_states[cam.id] = state
+                    elif state.status == "tracking":
+                        log.info(f"[{cam.id}] PTZ → HOLDING (split)")
+                        state.status     = "holding"
+                        state.hold_start = now
+                        if ctrl:
+                            ctrl.stop()
+
+                    elif state.status == "holding":
+                        elapsed         = now - state.hold_start
+                        neighbor_active = _any_neighbor_active(cam.id, results, cfg)
+                        if elapsed >= HOLD_DURATION or neighbor_active:
+                            reason = "timeout" if elapsed >= HOLD_DURATION else "neighbor active"
+                            log.info(f"[{cam.id}] PTZ → IDLE ({reason})")
+                            state.status = "idle"
+                            if ctrl:
+                                ctrl.go_home()
+
+                new_states[cam.id] = state
+
+            else:
+                # ── Normal single-stream camera ────────────────────────────────
+                cam_tracks = results.get(cam.id, [])
+                output[cam.id] = [
+                    {"id":   trk.get_global_id(cam.id, t.track_id) or t.track_id,
+                     "bbox": list(t.bbox), "cx": t.cx, "cy": t.cy}
+                    for t in cam_tracks
+                ]
+
+                if cam.type != "ptz":
+                    continue
+
+                ctrl      = ptz.get(cam.id)
+                state     = ptz_states.get(cam.id, PTZState())
+                best      = _best_track(cam_tracks)
+                is_manual = (now - _manual_override.get(cam.id, 0)) < MANUAL_OVERRIDE_TIMEOUT
+
+                if not is_manual:
+                    if best is not None:
+                        if state.status != "tracking":
+                            log.info(f"[{cam.id}] PTZ → TRACKING")
+                        state.status  = "tracking"
+                        state.last_cx = best.cx
+                        state.last_cy = best.cy
+                        if ctrl:
+                            ctrl.track_person(best.cx, best.cy)
+
+                    elif state.status == "tracking":
+                        log.info(f"[{cam.id}] PTZ → HOLDING (last pos {state.last_cx:.2f},{state.last_cy:.2f})")
+                        state.status     = "holding"
+                        state.hold_start = now
+                        if ctrl:
+                            ctrl.stop()
+
+                    elif state.status == "holding":
+                        elapsed         = now - state.hold_start
+                        neighbor_active = _any_neighbor_active(cam.id, results, cfg)
+                        if elapsed >= HOLD_DURATION or neighbor_active:
+                            reason = "timeout" if elapsed >= HOLD_DURATION else "neighbor active"
+                            log.info(f"[{cam.id}] PTZ → IDLE ({reason})")
+                            state.status = "idle"
+                            if ctrl:
+                                ctrl.go_home()
+
+                new_states[cam.id] = state
 
         with _lock:
             _ptz_states = new_states
@@ -179,8 +296,8 @@ def _processing_loop():
             if st.status == "holding":
                 elapsed = now_s - st.hold_start
                 hold_remaining = max(0.0, round(HOLD_DURATION - elapsed, 1))
-            manual_elapsed  = now_s - _manual_override.get(cam_id, 0)
-            is_manual_out   = manual_elapsed < MANUAL_OVERRIDE_TIMEOUT
+            manual_elapsed   = now_s - _manual_override.get(cam_id, 0)
+            is_manual_out    = manual_elapsed < MANUAL_OVERRIDE_TIMEOUT
             manual_remaining = round(MANUAL_OVERRIDE_TIMEOUT - manual_elapsed, 1) if is_manual_out else None
             states_out[cam_id] = {
                 "status":           st.status,
@@ -198,7 +315,6 @@ def _processing_loop():
 
 
 def _start_tracking(cfg: AppConfig):
-    """(Re)initialize all tracking components from a new config."""
     global _streams, _streams_sd, _detector, _tracker, _ptz, _ptz_states, \
            _worker, _running, _config
 
@@ -221,9 +337,17 @@ def _start_tracking(cfg: AppConfig):
             model_name  = str(MODEL_CACHE / YOLO_MODEL),
             confidence  = cfg.tracking.detection_confidence,
         )
-        _tracker = CrossCameraTracker(cfg)
 
-        new_streams = StreamManager()
+        # Tracker uses expanded virtual sub-cams for split cameras
+        expanded_cameras = _expand_cameras(cfg.cameras)
+        tracker_cfg = AppConfig(
+            yard_w=cfg.yard_w, yard_h=cfg.yard_h,
+            cameras=expanded_cameras, tracking=cfg.tracking,
+        )
+        _tracker = CrossCameraTracker(tracker_cfg)
+
+        # Streams: one physical stream per camera (not per virtual sub-cam)
+        new_streams    = StreamManager()
         new_streams_sd = StreamManager()
         for cam in cfg.cameras:
             new_streams.add(cam.id, cam.rtsp_4k)
@@ -302,7 +426,8 @@ def health():
 def get_cameras():
     if not _config:
         return []
-    return [{"id":c.id,"name":c.name,"type":c.type,"ip":c.ip} for c in _config.cameras]
+    return [{"id":c.id,"name":c.name,"type":c.type,"ip":c.ip,"split_stream":c.split_stream}
+            for c in _config.cameras]
 
 
 @app.get("/api/config")
@@ -318,7 +443,6 @@ class ConfigPayload(BaseModel):
 
 @app.post("/api/config")
 async def save_config(payload: ConfigPayload):
-    """Save new config (from UI) and hot-reload tracking."""
     data = payload.model_dump()
     CONFIG_PATH.write_text(json.dumps(data, indent=2))
     log.info("Config saved — reloading tracking...")
@@ -360,31 +484,60 @@ def ptz_stop(camera_id: str):
     return {"status": "ok"}
 
 
-# ─── MJPEG streams ────────────────────────────────────────────────────────────
+# ─── MJPEG streams ─────────────────────────────────────────────────────────────
+# Supports:
+#   /api/stream/{cam_id}        — full frame (split cameras: shows divider + both bboxes)
+#   /api/stream/{cam_id}_top    — top half with fixed-cam bboxes
+#   /api/stream/{cam_id}_bot    — bottom half with ptz-cam bboxes
 @app.get("/api/stream/{camera_id}")
 def mjpeg_stream(camera_id: str):
+    phys_id, half = _split_id(camera_id)
+
     def gen():
         while True:
             if not _streams_sd:
                 time.sleep(0.1); continue
-            fr = _streams_sd.get_frame(camera_id)
+            fr = _streams_sd.get_frame(phys_id)
             if fr is None:
                 time.sleep(0.05); continue
 
-            img = fr.image.copy()
-            cam_data = _latest.get(camera_id, [])
-            if isinstance(cam_data, list):
-                for det in cam_data:
-                    x1,y1,x2,y2 = det["bbox"]
-                    cv2.rectangle(img, (x1,y1), (x2,y2), (0,208,132), 2)
-                    cv2.putText(img, f"#{det['id']}", (x1, max(0,y1-6)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,208,132), 1)
+            img      = fr.image.copy()
+            h, w     = img.shape[:2]
+            mid      = h // 2
+
+            if half == "top":
+                img = img[:mid, :]
+                for det in _latest.get(camera_id, []):
+                    _draw_det(img, det, color=(0, 208, 132))
+
+            elif half == "bot":
+                img = img[mid:, :]
+                for det in _latest.get(camera_id, []):
+                    _draw_det(img, det, color=(245, 158, 11))
+
+            else:
+                cfg_s    = _config
+                phys_cam = next((c for c in cfg_s.cameras if c.id == phys_id), None) if cfg_s else None
+
+                if phys_cam and phys_cam.split_stream:
+                    cv2.line(img, (0, mid), (w, mid), (40, 70, 55), 1)
+                    cv2.putText(img, "FIXED", (5, 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 208, 132), 1)
+                    cv2.putText(img, "PTZ", (5, mid + 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (245, 158, 11), 1)
+                    for det in _latest.get(f"{phys_id}_top", []):
+                        _draw_det(img, det, color=(0, 208, 132))
+                    for det in _latest.get(f"{phys_id}_bot", []):
+                        _draw_det(img, det, color=(245, 158, 11), offset_y=mid)
+                else:
+                    for det in _latest.get(camera_id, []):
+                        _draw_det(img, det)
 
             ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
                        + jpg.tobytes() + b"\r\n")
-            time.sleep(1/15)
+            time.sleep(1 / 15)
 
     return StreamingResponse(
         gen(),
@@ -410,13 +563,27 @@ async def ws_tracks(ws: WebSocket):
 def index():
     if not _config:
         return HTMLResponse("<h1>Starting...</h1>")
-    cams = "".join(
-        f'<div><h3 style="color:#00d084">{c.name} '
-        f'<span style="color:#{"f59e0b" if c.type=="ptz" else "3b9ef5"};font-size:11px">'
-        f'{c.type.upper()}</span></h3>'
-        f'<img src="/api/stream/{c.id}" width="480" style="border:1px solid #1a2a35"/></div>'
-        for c in _config.cameras
-    )
+    cams_html = []
+    for c in _config.cameras:
+        type_color = "#f59e0b" if c.type == "ptz" else "#3b9ef5"
+        if c.split_stream:
+            cams_html.append(
+                f'<div><h3 style="color:#00d084">{c.name} '
+                f'<span style="color:{type_color};font-size:11px">{c.type.upper()}</span>'
+                f'<span style="color:#6a8292;font-size:11px"> SPLIT</span></h3>'
+                f'<div style="display:flex;gap:8px">'
+                f'<div><div style="color:#00d084;font-size:10px">↑ FIXED</div>'
+                f'<img src="/api/stream/{c.id}_top" width="240" style="border:1px solid #00d08444"/></div>'
+                f'<div><div style="color:#f59e0b;font-size:10px">↓ PTZ</div>'
+                f'<img src="/api/stream/{c.id}_bot" width="240" style="border:1px solid #f59e0b44"/></div>'
+                f'</div></div>'
+            )
+        else:
+            cams_html.append(
+                f'<div><h3 style="color:#00d084">{c.name} '
+                f'<span style="color:{type_color};font-size:11px">{c.type.upper()}</span></h3>'
+                f'<img src="/api/stream/{c.id}" width="480" style="border:1px solid #1a2a35"/></div>'
+            )
     return HTMLResponse(f"""<!DOCTYPE html><html>
 <head><title>CamTrack</title>
 <style>
@@ -424,7 +591,7 @@ def index():
   h1{{color:#00d084;letter-spacing:4px}}
   div{{display:inline-block;margin:8px;vertical-align:top}}
 </style></head>
-<body><h1>◈ CAMTRACK</h1>{cams}</body></html>""")
+<body><h1>◈ CAMTRACK</h1>{"".join(cams_html)}</body></html>""")
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
