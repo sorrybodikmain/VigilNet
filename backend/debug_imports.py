@@ -9,8 +9,8 @@ sys.stdout.write("step4: uvicorn\n"); sys.stdout.flush()
 import uvicorn
 sys.stdout.write("step5: config_loader\n"); sys.stdout.flush()
 from config_loader import load
-sys.stdout.write("step6: env_config\n"); sys.stdout.flush()
-from env_config import config_from_env
+sys.stdout.write("step6: db\n"); sys.stdout.flush()
+import db
 sys.stdout.write("step7: camera_stream\n"); sys.stdout.flush()
 from camera_stream import StreamManager
 sys.stdout.write("step8: detector\n"); sys.stdout.flush()

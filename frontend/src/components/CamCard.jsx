@@ -2,7 +2,32 @@ import { useState } from "react";
 import { styles } from "../styles.js";
 import { StateBadge, Fld } from "./ui.jsx";
 
-export function CamCard({ cam, color, tracks, ptzState, onUpdate, onPtz, onDelete }) {
+function CapBadges({ caps }) {
+  if (!caps || caps.status === "n/a") return null;
+  const pending = caps.status === "pending";
+  return (
+    <>
+      <span style={{
+        fontSize: 8, padding: "1px 5px", letterSpacing: 1,
+        border: `1px solid ${pending ? "#3a5262" : caps.has_ptz ? "#00d08466" : "#ef444466"}`,
+        color:  pending ? "#3a5262" : caps.has_ptz ? "#00d084" : "#ef4444",
+        background: !pending && caps.has_ptz ? "#00d08411" : !pending ? "#ef444411" : "transparent",
+      }}>
+        {pending ? "PTZ..." : caps.has_ptz ? "PTZ ✓" : "PTZ ✗"}
+      </span>
+      <span style={{
+        fontSize: 8, padding: "1px 5px", letterSpacing: 1,
+        border: `1px solid ${pending ? "#3a5262" : caps.has_zoom ? "#3b9ef566" : "#3a5262"}`,
+        color:  pending ? "#3a5262" : caps.has_zoom ? "#3b9ef5" : "#3a5262",
+        background: !pending && caps.has_zoom ? "#3b9ef511" : "transparent",
+      }}>
+        {pending ? "ZOOM..." : caps.has_zoom ? "ZOOM ✓" : "ZOOM ✗"}
+      </span>
+    </>
+  );
+}
+
+export function CamCard({ cam, color, tracks, ptzState, caps, onUpdate, onPtz, onDelete }) {
   const [open, setOpen] = useState(false);
   const zone = cam.zone_polygon_m || cam.zone || [];
 
@@ -16,6 +41,7 @@ export function CamCard({ cam, color, tracks, ptzState, onUpdate, onPtz, onDelet
         </span>
         <span style={{ fontSize:10, color:"#4a6272" }}>{cam.ip}</span>
         <StateBadge st={ptzState}/>
+        <CapBadges caps={caps}/>
         {tracks.length > 0 && (
           <span style={{ fontSize:10, color:"#ef4444" }}>● {tracks.length}</span>
         )}
@@ -81,16 +107,31 @@ export function CamCard({ cam, color, tracks, ptzState, onUpdate, onPtz, onDelet
           </div>
 
           {cam.type === "ptz" && (
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginTop:10 }}>
-              {[["pan_min","Pan Min°"],["pan_max","Pan Max°"],["tilt_min","Tilt Min°"],["tilt_max","Tilt Max°"]].map(([k,l]) => (
-                <div key={k}>
-                  <div style={styles.miniLabel}>{l}</div>
-                  <input type="number" value={cam.ptz_limits?.[k] ?? 0}
-                    onChange={e => onPtz(k, e.target.value)}
-                    style={{ ...styles.inp, textAlign:"center" }}/>
-                </div>
-              ))}
-            </div>
+            <>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginTop:10 }}>
+                {[["pan_min","Pan Min°"],["pan_max","Pan Max°"],["tilt_min","Tilt Min°"],["tilt_max","Tilt Max°"]].map(([k,l]) => (
+                  <div key={k}>
+                    <div style={styles.miniLabel}>{l}</div>
+                    <input type="number" value={cam.ptz_limits?.[k] ?? 0}
+                      onChange={e => onPtz(k, e.target.value)}
+                      style={{ ...styles.inp, textAlign:"center" }}/>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display:"flex", gap:16, marginTop:8 }}>
+                {[["ptz_invert_pan","ІНВЕРТУВАТИ PAN (←→)"],["ptz_invert_tilt","ІНВЕРТУВАТИ TILT (↑↓)"]].map(([f,l]) => (
+                  <label key={f} style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", userSelect:"none" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!cam[f]}
+                      onChange={e => onUpdate(f, e.target.checked)}
+                      style={{ accentColor:"#f59e0b", width:12, height:12 }}
+                    />
+                    <span style={{ fontSize:10, color: cam[f] ? "#f59e0b" : "#6a8292", letterSpacing:1 }}>{l}</span>
+                  </label>
+                ))}
+              </div>
+            </>
           )}
 
           <button onClick={onDelete} style={{ ...styles.deleteBtnFull, marginTop:10 }}>✕ REMOVE</button>

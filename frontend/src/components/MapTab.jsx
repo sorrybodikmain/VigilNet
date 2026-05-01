@@ -4,6 +4,8 @@ import { CANVAS_W, CANVAS_H, CAM_COLORS, STATE_COLOR, uid } from "../constants.j
 import { CamPanel } from "./CamPanel.jsx";
 import { ToolSec, getBBox, rectsOverlap } from "./ui.jsx";
 
+const CAM_HIT_RADIUS = 16;
+
 const LEGEND = [
   ["#3b9ef5",           "FIXED CAM"],
   ["#f59e0b",           "PTZ CAM"],
@@ -19,7 +21,10 @@ export function MapTab({ cameras, setCameras, yard, setYard, tracks, ptzStates }
   const [drawPts, setDrawPts]       = useState([]);
   const [mouse, setMouse]           = useState(null);
   const [tick, setTick]             = useState(0);
-  const canvasRef = useRef(null);
+  const [hoverCamId, setHoverCamId] = useState(null);
+  const canvasRef  = useRef(null);
+  const dragIdRef  = useRef(null);
+  const wasDragged = useRef(false);
 
   const selected = cameras.find(c => c.id === selectedId);
   const colorOf  = cam => CAM_COLORS[cameras.indexOf(cam) % CAM_COLORS.length];
@@ -263,7 +268,34 @@ export function MapTab({ cameras, setCameras, yard, setYard, tracks, ptzStates }
     setDrawPts([]); setTool("select");
   }, [drawPts, selectedId, pxToM, setCameras]);
 
+  const _findCamAt = useCallback((pos) => {
+    let found = null;
+    cameras.forEach(cam => {
+      const pos2 = cam.position_m || cam.position || { x:5, y:5 };
+      const p    = mToPx(pos2.x, pos2.y);
+      if (Math.hypot(pos.x - p.x, pos.y - p.y) < CAM_HIT_RADIUS) found = cam.id;
+    });
+    return found;
+  }, [cameras, mToPx]);
+
+  const handleMouseDown = useCallback(e => {
+    if (tool !== "select") return;
+    const pos   = getPos(e);
+    const found = _findCamAt(pos);
+    if (found) {
+      dragIdRef.current  = found;
+      wasDragged.current = false;
+      setSelectedId(found);
+      e.preventDefault();
+    }
+  }, [tool, getPos, _findCamAt]);
+
+  const handleMouseUp = useCallback(() => {
+    dragIdRef.current = null;
+  }, []);
+
   const handleClick = useCallback(e => {
+    if (wasDragged.current) { wasDragged.current = false; return; }
     const pos = getPos(e);
     if (tool === "place") {
       const m  = pxToM(pos.x, pos.y);
@@ -288,23 +320,29 @@ export function MapTab({ cameras, setCameras, yard, setYard, tracks, ptzStates }
       setDrawPts(p => [...p, pos]); return;
     }
     if (tool === "select") {
-      let found = null;
-      cameras.forEach(cam => {
-        const pos2 = cam.position_m || cam.position || { x:5, y:5 };
-        const p    = mToPx(pos2.x, pos2.y);
-        if (Math.hypot(pos.x-p.x, pos.y-p.y) < 16) found = cam.id;
-      });
-      setSelectedId(found);
+      setSelectedId(_findCamAt(pos));
     }
-  }, [tool, drawPts, cameras, getPos, pxToM, mToPx, saveZone, setCameras]);
+  }, [tool, drawPts, cameras, getPos, pxToM, _findCamAt, saveZone, setCameras]);
 
-  const handleDbl  = useCallback(() => {
+  const handleDbl = useCallback(() => {
     if (tool === "zone" && drawPts.length >= 3) saveZone();
   }, [tool, drawPts, saveZone]);
 
   const handleMove = useCallback(e => {
-    setMouse(tool === "place" || tool === "zone" ? getPos(e) : null);
-  }, [tool, getPos]);
+    const pos = getPos(e);
+    if (tool === "place" || tool === "zone") {
+      setMouse(pos);
+    } else {
+      setMouse(null);
+      if (tool === "select") setHoverCamId(_findCamAt(pos));
+    }
+    if (dragIdRef.current) {
+      wasDragged.current = true;
+      const m = pxToM(pos.x, pos.y);
+      setCameras(p => p.map(c => c.id === dragIdRef.current
+        ? { ...c, position_m: m, position: m } : c));
+    }
+  }, [tool, getPos, pxToM, _findCamAt, setCameras]);
 
   const updateCam = (id, f, v) => setCameras(p => p.map(c => c.id===id ? { ...c, [f]:v } : c));
   const updatePtz = (id, f, v) => setCameras(p => p.map(c => c.id===id ? { ...c, ptz_limits:{ ...c.ptz_limits, [f]:parseFloat(v) } } : c));
@@ -369,9 +407,22 @@ export function MapTab({ cameras, setCameras, yard, setYard, tracks, ptzStates }
       {/* ── Canvas ── */}
       <div style={styles.canvasWrap}>
         <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H}
-          onClick={handleClick} onMouseMove={handleMove}
-          onDoubleClick={handleDbl} onMouseLeave={() => setMouse(null)}
-          style={{ ...styles.canvas, cursor: tool==="place"||tool==="zone" ? "crosshair" : "default" }}
+          onClick={handleClick}
+          onMouseDown={handleMouseDown}
+          onMouseUp={handleMouseUp}
+          onMouseMove={handleMove}
+          onDoubleClick={handleDbl}
+          onMouseLeave={() => { setMouse(null); setHoverCamId(null); dragIdRef.current = null; }}
+          style={{
+            ...styles.canvas,
+            cursor: tool === "place" || tool === "zone"
+              ? "crosshair"
+              : dragIdRef.current
+                ? "grabbing"
+                : hoverCamId && tool === "select"
+                  ? "grab"
+                  : "default",
+          }}
         />
         <div style={styles.mapFoot}>{yard.w}м × {yard.h}м</div>
       </div>
@@ -386,6 +437,8 @@ export function MapTab({ cameras, setCameras, yard, setYard, tracks, ptzStates }
               onUpdate={(f,v) => updateCam(selected.id, f, v)}
               onPtz={(f,v)    => updatePtz(selected.id, f, v)}
               onDelete={() => deleteCam(selected.id)}
+              onPosition={(x, y) => setCameras(p => p.map(c => c.id === selected.id
+                ? { ...c, position_m: { x, y }, position: { x, y } } : c))}
             />
           : <div style={styles.empty}>
               <div style={{ fontSize:28, marginBottom:12, opacity:.3 }}>⊡</div>

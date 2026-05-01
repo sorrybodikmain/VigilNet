@@ -1,4 +1,4 @@
-# ◈ VigilNet — Multi-Camera Person Tracker
+# ◈ CamTrack — Multi-Camera Person Tracker
 
 > Ukrainian version: [README-UA.md](./README-UA.md)
 
@@ -9,62 +9,55 @@ Built and tested with **iCSee PTZ cameras** (models: `IPG-X2-WEQ2`, `X6C-WEQ`). 
 ## Stack
 
 - **Backend:** FastAPI + YOLOv8 + appearance Re-ID + ONVIF PTZ control
+- **Database:** PostgreSQL (camera config, settings)
 - **Frontend:** React + Vite → served by Nginx
-- **Infra:** Docker Compose, NVIDIA CUDA 12.1, PyTorch GPU
+- **Infra:** Docker Compose, NVIDIA CUDA 12, PyTorch GPU
 
 ## Quick Start
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/sorrybodikmain/VigilNet.git
-cd VigilNet
+git clone <repo-url>
+cd camtrack-docker
 
-# 2. Configure your cameras
+# 2. Configure infrastructure
 cp .env.example .env
-nano .env
+nano .env   # set DB credentials, ports, model
 
 # 3. Build and start
 docker compose up -d --build
 
-# 4. Open in browser
-open http://localhost        # Zone configurator UI
-open http://localhost:8765   # Backend API / live stream grid
+# 4. Open the UI and add cameras
+open http://localhost        # UI (CAMERAS tab → add cameras → SAVE)
+open http://localhost:8765   # Backend API
 ```
 
-## Configuration
-
-All settings live in `.env`. Copy `.env.example` and fill in your camera credentials:
-
-```env
-CAM1_IP=192.168.1.10
-CAM1_USER=admin
-CAM1_PASSWORD=yourpassword
-```
-
-The backend auto-generates `config/camtrack_config.json` from `.env` on first run. You can also configure camera zones visually via the **MAP** tab in the UI.
+Cameras are added and configured entirely through the UI — no `.env` editing required.
 
 ## Project Structure
 
 ```
-VigilNet/
-├── .env.example                 ← copy to .env and fill in
+camtrack-docker/
+├── .env.example             ← copy to .env (no camera data here)
 ├── docker-compose.yml
 ├── backend/
-│   ├── Dockerfile               ← nvidia/cuda:12.1 + PyTorch GPU
-│   ├── main.py                  ← FastAPI server
-│   ├── env_config.py            ← generates config from .env
-│   ├── config_loader.py         ← reads/writes camtrack_config.json
-│   ├── camera_stream.py         ← RTSP capture (1 thread/camera)
-│   ├── detector.py              ← YOLOv8 person detection
-│   ├── reid.py                  ← appearance Re-ID
-│   ├── cross_tracker.py         ← multi-camera tracking
-│   └── ptz_controller.py        ← ONVIF PTZ control
-├── frontend/
-│   ├── Dockerfile               ← Vite build → Nginx
-│   ├── nginx.conf               ← proxies /api/ and /ws/ to backend
-│   └── src/App.jsx              ← zone configurator UI
-└── config/
-    └── camtrack_config.example.json
+│   ├── main.py              ← FastAPI server
+│   ├── db.py                ← PostgreSQL persistence
+│   ├── config_loader.py     ← dataclasses + serialization
+│   ├── camera_stream.py     ← RTSP capture (1 thread/camera)
+│   ├── detector.py          ← YOLOv8 person detection
+│   ├── reid.py              ← appearance Re-ID
+│   ├── cross_tracker.py     ← multi-camera tracking
+│   └── ptz_controller.py   ← ONVIF PTZ control
+└── frontend/
+    ├── Dockerfile           ← Vite build → Nginx
+    ├── nginx.conf           ← proxies /api/, /ws/ → backend
+    └── src/
+        └── components/
+            ├── CamerasTab.jsx     ← add / edit cameras
+            ├── CalibrationTab.jsx ← PTZ calibration wizard
+            ├── StreamsTab.jsx     ← live MJPEG streams
+            └── MapTab.jsx         ← zone editor
 ```
 
 ## Workflow
@@ -72,95 +65,100 @@ VigilNet/
 ```
 1. docker compose up -d --build
 2. Open http://localhost
-3. MAP tab → draw coverage zones for each camera
-4. Click SAVE & APPLY → backend reloads tracking config
-5. STREAMS tab → watch live video with bounding boxes
-6. WebSocket counter in the header shows active tracked persons
+3. CAMERAS tab → add cameras (RTSP URLs, ONVIF, type)
+4. Click SAVE & APPLY
+5. CALIBRATE tab → test PTZ directions, fix tilt, set home position
+6. MAP tab → draw coverage zones for each camera
+7. STREAMS tab → live video with bounding boxes
 ```
 
-## Networking
+## Camera Configuration (UI)
 
-- Backend runs with `network_mode: host` — can reach cameras on the local subnet directly
-- Frontend runs in bridge mode — Nginx proxies `/api/` and `/ws/` to `host-gateway:8765`
-- Ports: frontend `:80`, backend `:8765`
+All camera data lives in PostgreSQL, edited via **CAMERAS** tab:
 
-## GPU Requirements
+| Field             | Description                              |
+| ----------------- | ---------------------------------------- |
+| Name / IP         | Camera identifier                        |
+| RTSP 4K           | Detection stream (high-res)              |
+| RTSP SD           | Display stream (lower bandwidth)         |
+| ONVIF URL         | PTZ control endpoint                     |
+| Type              | `fixed` or `ptz`                         |
+| Split Stream      | Top half = fixed lens, bottom = PTZ lens |
+| Invert Pan / Tilt | Flip PTZ direction if camera is inverted |
 
-Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html):
+## PTZ Calibration
 
-```bash
-distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list \
-  | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo systemctl restart docker
-```
+Open **CALIBRATE** tab for step-by-step wizard:
+
+1. **Direction test** — press arrows, confirm pan/tilt direction (auto-sets inversion)
+2. **Tilt offset** — slider to fix "camera looks at ground" issue
+3. **Home position** — position camera and save as default resting point
+4. **Fixed↔PTZ alignment** — verify split-stream halves track the same person
 
 ## Split Stream (Dual-Sensor Cameras)
 
-Some cameras output a single vertical RTSP stream where the **top half is a fixed wide-angle lens** and the **bottom half is a PTZ lens**. Enable this per-camera with `split_stream: true` in `camtrack_config.json` or via the checkbox in the **CAMERAS** tab of the UI.
+Some cameras output one vertical RTSP stream where the **top half is a fixed wide-angle lens** and the **bottom half is a PTZ lens**. Enable per-camera via **CAMERAS** tab → `Split Stream` checkbox.
 
 When enabled:
-- One physical RTSP connection is opened (no bandwidth duplication)
-- The frame is split at `height / 2` — top half → `{id}_top` (fixed), bottom half → `{id}_bot` (PTZ)
-- YOLO detection and Re-ID tracking run independently on each half
-- PTZ auto-follow is driven by detections in the bottom half
-- The **STREAMS** tab shows both sub-streams side-by-side in a single card
-- MJPEG endpoints: `/api/stream/{id}_top`, `/api/stream/{id}_bot`, `/api/stream/{id}` (full frame with divider)
 
-> **⚠️ Work in progress** — split stream support is not yet fully production-ready. Known limitations: zone drawing on the MAP tab does not account for the coordinate offset of each half; Re-ID handoff between split halves of the same camera is not yet tuned.
+- One physical RTSP connection (no bandwidth duplication)
+- Frame split at `height / 2` → `{id}_top` (fixed), `{id}_bot` (PTZ)
+- YOLO + Re-ID run independently on each half
+- PTZ auto-follow driven by detections in the bottom half
+- MJPEG endpoints: `/api/stream/{id}_top`, `/api/stream/{id}_bot`, `/api/stream/{id}`
 
 ## API Reference
 
-| Endpoint                  | Method | Description                              |
-| ------------------------- | ------ | ---------------------------------------- |
-| `/api/health`             | GET    | Health check                             |
-| `/api/config`             | GET    | Get current config                       |
-| `/api/config`             | POST   | Save new config                          |
-| `/api/cameras`            | GET    | List cameras                             |
-| `/api/tracks`             | GET    | Current tracking data                    |
-| `/api/stream/{id}`        | GET    | MJPEG stream with bounding boxes         |
-| `/api/stream/{id}_top`    | GET    | MJPEG — top half of a split-stream camera |
-| `/api/stream/{id}_bot`    | GET    | MJPEG — bottom half of a split-stream camera |
-| `/ws/tracks`              | WS     | Real-time tracking updates               |
+| Endpoint                    | Method | Description                        |
+| --------------------------- | ------ | ---------------------------------- |
+| `/api/health`               | GET    | Health check                       |
+| `/api/config`               | GET    | Current config                     |
+| `/api/config`               | POST   | Save config                        |
+| `/api/cameras`              | GET    | List cameras                       |
+| `/api/capabilities`         | GET    | PTZ/zoom capabilities per camera   |
+| `/api/tracks`               | GET    | Current tracking data              |
+| `/api/stream/{id}`          | GET    | MJPEG stream with bounding boxes   |
+| `/api/stream/{id}_top`      | GET    | Top half of split-stream camera    |
+| `/api/stream/{id}_bot`      | GET    | Bottom half of split-stream camera |
+| `/api/ptz/{id}/move`        | POST   | Manual PTZ move                    |
+| `/api/ptz/{id}/stop`        | POST   | Stop PTZ movement                  |
+| `/api/ptz/{id}/home/go`     | POST   | Return to home position            |
+| `/api/ptz/{id}/home/set`    | POST   | Save current position as home      |
+| `/api/ptz/{id}/tilt_offset` | POST   | Update tilt tracking offset        |
+| `/ws/tracks`                | WS     | Real-time tracking updates         |
 
 ## iCSee RTSP URL Format
 
 ```
-rtsp://admin:{password}@{ip}:554/user=admin&password={password}&stream=0.sdp   # 4K main stream
-rtsp://admin:{password}@{ip}:554/user=admin&password={password}&stream=1.sdp   # SD sub-stream (recommended for tracking)
+rtsp://user:pass@{ip}:554/user=user&password=pass&stream=0.sdp   # 4K main
+rtsp://user:pass@{ip}:554/user=user&password=pass&stream=1.sdp   # SD sub-stream
 ```
 
 ## ONVIF PTZ URL
 
 ```
 http://{ip}:80/onvif/device_service
-http://{ip}:8000/onvif/device_service   # some models use port 8000
-```
-
-## Upgrading Re-ID
-
-Replace `extract_feature()` in `reid.py` with a deep model for ~95% accuracy:
-
-```python
-import torchreid
-model = torchreid.models.build_model("osnet_x0_25", num_classes=1)
+http://{ip}:8899/onvif/device_service   # iCSee cameras
 ```
 
 ## Docker Volumes
 
-| Volume            | Contents                                                  |
-| ----------------- | --------------------------------------------------------- |
-| `camtrack_config` | `camtrack_config.json` — camera zones and tracking config |
-| `camtrack_models` | YOLOv8 `.pt` model file (cached to avoid re-downloading)  |
+| Volume            | Contents                                  |
+| ----------------- | ----------------------------------------- |
+| `camtrack_db`     | PostgreSQL data (camera config, settings) |
+| `camtrack_models` | YOLOv8 `.pt` model file                   |
 
 ## Logs
 
 ```bash
 docker logs camtrack_backend -f
+docker logs camtrack_postgres -f
 docker logs camtrack_frontend -f
 ```
+
+## GPU Requirements
+
+Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
 
 ## License
 

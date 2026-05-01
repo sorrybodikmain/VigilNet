@@ -6,17 +6,26 @@ import { Header } from "./components/Header.jsx";
 import { MapTab } from "./components/MapTab.jsx";
 import { CamerasTab } from "./components/CamerasTab.jsx";
 import { StreamsTab } from "./components/StreamsTab.jsx";
+import { CalibrationTab } from "./components/CalibrationTab.jsx";
 import { ExportTab } from "./components/ExportTab.jsx";
 
 export function App() {
-  const [tab, setTab]         = useState("map");
-  const [cameras, setCameras] = useState([]);
-  const [yard, setYard]       = useState({ w:20, h:15 });
-  const [toast, setToast]     = useState(null);
-  const [saving, setSaving]   = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [tab, setTab]               = useState("map");
+  const [cameras, setCameras]       = useState([]);
+  const [yard, setYard]             = useState({ w:20, h:15 });
+  const [toast, setToast]           = useState(null);
+  const [saving, setSaving]         = useState(false);
+  const [loading, setLoading]       = useState(true);
+  const [capabilities, setCapabilities] = useState({});
 
   const { tracks, ptzStates } = useWebSocket();
+
+  const fetchCapabilities = () => {
+    fetch("/api/capabilities")
+      .then(r => r.ok ? r.json() : {})
+      .then(setCapabilities)
+      .catch(() => {});
+  };
 
   const showToast = (msg, type = "ok") => {
     setToast({ msg, type });
@@ -38,6 +47,10 @@ export function App() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
+    fetchCapabilities();
+    const capTimer = setInterval(fetchCapabilities, 5000);
+    return () => clearInterval(capTimer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Save config ──────────────────────────────────────────────────────────────
@@ -59,8 +72,13 @@ export function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (r.ok) showToast("✓ Конфіг збережено і застосовано", "ok");
-      else       showToast("✗ Помилка збереження", "err");
+      if (r.ok) {
+        showToast("✓ Конфіг збережено і застосовано", "ok");
+        setCapabilities({});
+        setTimeout(fetchCapabilities, 3000);
+      } else {
+        showToast("✗ Помилка збереження", "err");
+      }
     } catch {
       showToast("✗ Backend недоступний", "err");
     }
@@ -69,6 +87,8 @@ export function App() {
 
   // ── Camera CRUD ──────────────────────────────────────────────────────────────
   const updateCam = (id, f, v) => setCameras(p => p.map(c => c.id===id ? { ...c, [f]:v } : c));
+
+  const saveCamPatch = (id, patch) => setCameras(p => p.map(c => c.id===id ? { ...c, ...patch } : c));
   const updatePtz = (id, f, v) => setCameras(p => p.map(c => c.id===id
     ? { ...c, ptz_limits: { ...c.ptz_limits, [f]: parseFloat(v) } } : c));
   const deleteCam = id => setCameras(p => p.filter(c => c.id !== id));
@@ -113,13 +133,22 @@ export function App() {
       {tab === "cameras" && (
         <CamerasTab
           cameras={cameras} tracks={tracks} ptzStates={ptzStates}
+          capabilities={capabilities}
           onAdd={addCam}
           onUpdate={updateCam} onPtz={updatePtz} onDelete={deleteCam}
         />
       )}
 
       {tab === "streams" && (
-        <StreamsTab cameras={cameras} tracks={tracks} ptzStates={ptzStates}/>
+        <StreamsTab cameras={cameras} tracks={tracks} ptzStates={ptzStates} capabilities={capabilities}/>
+      )}
+
+      {tab === "calibrate" && (
+        <CalibrationTab
+          cameras={cameras}
+          capabilities={capabilities}
+          onSaveCam={saveCamPatch}
+        />
       )}
 
       {tab === "export" && (

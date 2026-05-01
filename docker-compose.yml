@@ -5,6 +5,30 @@ version: "3.9"
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
+  # ── PostgreSQL — зберігає конфіг камер ────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: camtrack_postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${DB_NAME:-camtrack}
+      POSTGRES_USER: ${DB_USER:-camtrack}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-camtrack}
+
+    volumes:
+      - camtrack_db:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-camtrack} -d ${DB_NAME:-camtrack}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # ── Python backend: FastAPI + YOLOv8 GPU + ONVIF PTZ ──────────────────────
   backend:
     build:
@@ -23,8 +47,11 @@ services:
       - "${BACKEND_PORT:-8765}:8765"
 
     volumes:
-      - ./config:/app/config
       - camtrack_models:/app/models
+
+    depends_on:
+      postgres:
+        condition: service_healthy
 
     deploy:
       resources:
@@ -39,7 +66,29 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s # час на завантаження YOLO моделі
+      start_period: 60s
+
+  # ── pgAdmin 4 — веб-інтерфейс до PostgreSQL ──────────────────────────────
+  # pgadmin:
+  #   image: dpage/pgadmin4:latest
+  #   container_name: camtrack_pgadmin
+  #   restart: unless-stopped
+
+  #   environment:
+  #     PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+  #     PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+  #     PGADMIN_CONFIG_SERVER_MODE: "False"
+  #     PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+
+  #   ports:
+  #     - "${PGADMIN_PORT:-5050}:80"
+
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+
+  #   volumes:
+  #     - camtrack_pgadmin:/var/lib/pgadmin
 
   # ── React frontend: Vite build → Nginx ────────────────────────────────────
   frontend:
@@ -58,9 +107,10 @@ services:
       backend:
         condition: service_healthy
 
-    # frontend на bridge, бо йому не треба бачити камери напряму
-    # (він тільки проксює через Nginx до backend)
-
 volumes:
+  camtrack_db:
+    driver: local
   camtrack_models:
     driver: local
+  # camtrack_pgadmin:
+  #   driver: local

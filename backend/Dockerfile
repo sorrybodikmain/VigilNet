@@ -17,8 +17,7 @@ RUN pip download "onvif-zeep==0.2.12" --no-deps --no-binary ":all:" -d /tmp/onvi
     && cd /tmp && tar xzf /tmp/onvif-dl/onvif_zeep-0.2.12.tar.gz \
     && WSDL_DST=$(python3 -c "import onvif,os; print(os.path.join(os.path.dirname(os.path.dirname(onvif.__file__)),'wsdl'))") \
     && cp -r /tmp/onvif_zeep-0.2.12/wsdl "$WSDL_DST" \
-    && rm -rf /tmp/onvif-dl /tmp/onvif_zeep-0.2.12 \
-    && echo "ONVIF WSDL installed at $WSDL_DST"
+    && rm -rf /tmp/onvif-dl /tmp/onvif_zeep-0.2.12
 
 # ── Попередньо завантажити YOLO модель ──────────────────────────────────────
 # Це робить build повільнішим але перший запуск миттєвим

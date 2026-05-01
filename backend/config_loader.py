@@ -1,8 +1,6 @@
-"""Load / save AppConfig from JSON produced by the React UI."""
+"""AppConfig dataclasses + dict serialization. DB I/O lives in db.py."""
 from __future__ import annotations
-import json
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 
@@ -27,7 +25,11 @@ class CameraConfig:
     zone_polygon_m:  list             # [{x,y}, ...]
     ptz_limits:      Optional[PTZLimits]
     color:           str  = "#00d084"
-    split_stream:    bool = False     # top half = fixed, bottom half = ptz
+    split_stream:    bool = False
+    ptz_invert_pan:  bool  = False
+    ptz_invert_tilt: bool  = False
+    ptz_tilt_offset: float = 0.0
+    has_zoom:        Optional[bool] = None
 
 
 @dataclass
@@ -50,32 +52,33 @@ class AppConfig:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load(path: str | Path) -> AppConfig:
-    data = json.loads(Path(path).read_text())
-    cameras = []
-    for c in data["cameras"]:
-        ptz = PTZLimits(**c["ptz_limits"]) if c.get("ptz_limits") else None
-        cameras.append(CameraConfig(
-            id             = c["id"],
-            name           = c["name"],
-            type           = c["type"],
-            rtsp_4k        = c["rtsp_4k"],
-            rtsp_sd        = c.get("rtsp_sd", c["rtsp_4k"]),
-            ip             = c["ip"],
-            onvif_url      = c.get("onvif_url"),
-            position_m     = c.get("position_m", {"x": 5, "y": 5}),
-            zone_polygon_m = c.get("zone_polygon_m", []),
-            ptz_limits     = ptz,
-            color          = c.get("color", "#00d084"),
-            split_stream   = c.get("split_stream", False),
-        ))
-
-    tr = data.get("tracking", {})
-    tracking = TrackingConfig(
-        **{k: tr[k] for k in tr if hasattr(TrackingConfig, k)}
+def _cam_from_dict(c: dict) -> CameraConfig:
+    ptz = PTZLimits(**c["ptz_limits"]) if c.get("ptz_limits") else None
+    return CameraConfig(
+        id              = c["id"],
+        name            = c["name"],
+        type            = c["type"],
+        rtsp_4k         = c["rtsp_4k"],
+        rtsp_sd         = c.get("rtsp_sd", c["rtsp_4k"]),
+        ip              = c["ip"],
+        onvif_url       = c.get("onvif_url"),
+        position_m      = c.get("position_m", {"x": 5, "y": 5}),
+        zone_polygon_m  = c.get("zone_polygon_m", []),
+        ptz_limits      = ptz,
+        color           = c.get("color", "#00d084"),
+        split_stream    = c.get("split_stream",    False),
+        ptz_invert_pan  = c.get("ptz_invert_pan",  False),
+        ptz_invert_tilt = c.get("ptz_invert_tilt", False),
+        ptz_tilt_offset = float(c.get("ptz_tilt_offset", 0.0)),
+        has_zoom        = c.get("has_zoom", None),
     )
 
-    yard = data.get("yard", {})
+
+def load_from_dict(data: dict) -> AppConfig:
+    cameras  = [_cam_from_dict(c) for c in data.get("cameras", [])]
+    tr       = data.get("tracking", {})
+    tracking = TrackingConfig(**{k: tr[k] for k in tr if hasattr(TrackingConfig, k)})
+    yard     = data.get("yard", {})
     return AppConfig(
         yard_w   = yard.get("width_m",  20),
         yard_h   = yard.get("height_m", 15),
@@ -85,26 +88,29 @@ def load(path: str | Path) -> AppConfig:
 
 
 def config_to_dict(cfg: AppConfig) -> dict:
-    """Serialize AppConfig → plain dict (JSON-serializable)."""
     cameras = []
     for c in cfg.cameras:
         cameras.append({
-            "id":             c.id,
-            "name":           c.name,
-            "type":           c.type,
-            "rtsp_4k":        c.rtsp_4k,
-            "rtsp_sd":        c.rtsp_sd,
-            "ip":             c.ip,
-            "onvif_url":      c.onvif_url,
-            "position_m":     c.position_m,
-            "zone_polygon_m": c.zone_polygon_m,
-            "ptz_limits":     asdict(c.ptz_limits) if c.ptz_limits else None,
-            "color":          c.color,
-            "split_stream":   c.split_stream,
+            "id":              c.id,
+            "name":            c.name,
+            "type":            c.type,
+            "rtsp_4k":         c.rtsp_4k,
+            "rtsp_sd":         c.rtsp_sd,
+            "ip":              c.ip,
+            "onvif_url":       c.onvif_url,
+            "position_m":      c.position_m,
+            "zone_polygon_m":  c.zone_polygon_m,
+            "ptz_limits":      asdict(c.ptz_limits) if c.ptz_limits else None,
+            "color":           c.color,
+            "split_stream":    c.split_stream,
+            "ptz_invert_pan":  c.ptz_invert_pan,
+            "ptz_invert_tilt": c.ptz_invert_tilt,
+            "ptz_tilt_offset": c.ptz_tilt_offset,
+            "has_zoom":        c.has_zoom,
         })
     return {
-        "version": "1.0",
-        "yard":    {"width_m": cfg.yard_w, "height_m": cfg.yard_h},
-        "cameras": cameras,
+        "version":  "1.0",
+        "yard":     {"width_m": cfg.yard_w, "height_m": cfg.yard_h},
+        "cameras":  cameras,
         "tracking": asdict(cfg.tracking),
     }

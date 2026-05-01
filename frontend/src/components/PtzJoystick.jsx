@@ -25,7 +25,7 @@ const btnStop = {
   border: "1px solid #3a1a1a",
 };
 
-export function PtzJoystick({ camId, isManual, manualRemaining }) {
+export function PtzJoystick({ camId, isManual, manualRemaining, hasZoom = true }) {
   const activeRef = useRef(false);
 
   const sendMove = useCallback((pan, tilt, zoom = 0) => {
@@ -87,13 +87,23 @@ export function PtzJoystick({ camId, isManual, manualRemaining }) {
         <div/>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <div style={{ fontSize: 8, color: "#3a5262", letterSpacing: 2, marginBottom: 2, textAlign: "center" }}>
-          ZOOM
+      {hasZoom ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ fontSize: 8, color: "#3a5262", letterSpacing: 2, marginBottom: 2, textAlign: "center" }}>
+            ZOOM
+          </div>
+          <button style={btn} {...press(0, 0, SPEED_Z)}>+</button>
+          <button style={btn} {...press(0, 0, -SPEED_Z)}>−</button>
         </div>
-        <button style={btn} {...press(0, 0, SPEED_Z)}>+</button>
-        <button style={btn} {...press(0, 0, -SPEED_Z)}>−</button>
-      </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <div style={{ fontSize: 8, color: "#3a5262", letterSpacing: 2, marginBottom: 2 }}>ZOOM</div>
+          <div style={{
+            fontSize: 8, color: "#3a5262", border: "1px solid #1a2a35",
+            padding: "3px 6px", letterSpacing: 1, textAlign: "center",
+          }}>N/A</div>
+        </div>
+      )}
 
       {isManual && (
         <div style={{

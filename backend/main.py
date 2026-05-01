@@ -21,12 +21,12 @@ from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
-from config_loader  import load as load_cfg, AppConfig, CameraConfig, config_to_dict
-from env_config     import config_from_env
+from config_loader  import AppConfig, CameraConfig, config_to_dict, load_from_dict
 from camera_stream  import StreamManager
 from detector       import PersonDetector
 from cross_tracker  import CrossCameraTracker
-from ptz_controller import PTZController, SOFT_LOST
+from ptz_controller import PTZController, PTZCapabilities, SOFT_LOST
+import db
 
 logging.basicConfig(
     level   = logging.INFO,
@@ -46,7 +46,6 @@ class PTZState:
     hold_start: float = 0.0
 
 # ─── Global state ─────────────────────────────────────────────────────────────
-CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/camtrack_config.json"))
 MODEL_CACHE = Path(os.environ.get("MODEL_CACHE", "/app/models"))
 YOLO_MODEL  = os.environ.get("YOLO_MODEL", "yolov8n.pt")
 BACKEND_PORT= int(os.environ.get("BACKEND_PORT", 8765))
@@ -68,6 +67,7 @@ _latest: dict                      = {}
 _worker: threading.Thread | None   = None
 _running        = False
 _frame_count    = 0
+_cam_capabilities: dict[str, dict] = {}
 
 
 # ─── Split-stream helpers ──────────────────────────────────────────────────────
@@ -314,6 +314,35 @@ def _processing_loop():
     log.info("Processing loop stopped")
 
 
+def _run_calibration(ptz_controllers: dict[str, PTZController], all_cameras: list):
+    global _cam_capabilities
+    for cam in all_cameras:
+        if cam.id not in _cam_capabilities or _cam_capabilities[cam.id].get("status") == "pending":
+            _cam_capabilities[cam.id] = {
+                "has_ptz":  cam.type == "ptz",
+                "has_zoom": False,
+                "status":   "pending" if cam.type == "ptz" else "n/a",
+            }
+
+    for cam_id, ctrl in ptz_controllers.items():
+        try:
+            caps: PTZCapabilities = ctrl.calibrate()
+            _cam_capabilities[cam_id] = {
+                "has_ptz":  caps.has_ptz,
+                "has_zoom": caps.has_zoom,
+                "status":   "ok" if caps.has_ptz else "failed",
+            }
+        except Exception as e:
+            log.warning(f"[{cam_id}] Calibration exception: {e}")
+            _cam_capabilities[cam_id] = {"has_ptz": False, "has_zoom": False, "status": "error"}
+
+    for cam in all_cameras:
+        if cam.type != "ptz":
+            _cam_capabilities[cam.id] = {"has_ptz": False, "has_zoom": False, "status": "n/a"}
+
+    log.info(f"Calibration complete: {_cam_capabilities}")
+
+
 def _start_tracking(cfg: AppConfig):
     global _streams, _streams_sd, _detector, _tracker, _ptz, _ptz_states, \
            _worker, _running, _config
@@ -329,6 +358,13 @@ def _start_tracking(cfg: AppConfig):
     for ctrl in _ptz.values():
         try: ctrl.go_home()
         except: pass
+
+    # Build PTZ controllers BEFORE acquiring the lock — each spawns its own
+    # ONVIF connection thread so this returns immediately without blocking.
+    new_ptz: dict[str, PTZController] = {}
+    for cam in cfg.cameras:
+        if cam.type == "ptz":
+            new_ptz[cam.id] = PTZController(cam, cfg.tracking.ptz_smoothing_factor)
 
     with _lock:
         _config = cfg
@@ -355,13 +391,23 @@ def _start_tracking(cfg: AppConfig):
         _streams    = new_streams
         _streams_sd = new_streams_sd
 
-        new_ptz: dict[str, PTZController] = {}
-        for cam in cfg.cameras:
-            if cam.type == "ptz" and cam.onvif_url:
-                new_ptz[cam.id] = PTZController(cam, cfg.tracking.ptz_smoothing_factor)
         _ptz = new_ptz
 
         _ptz_states = {cam.id: PTZState() for cam in cfg.cameras if cam.type == "ptz"}
+
+        for cam in cfg.cameras:
+            _cam_capabilities[cam.id] = {
+                "has_ptz":  cam.type == "ptz",
+                "has_zoom": False,
+                "status":   "pending" if cam.type == "ptz" else "n/a",
+            }
+
+    threading.Thread(
+        target=_run_calibration,
+        args=(dict(_ptz), list(cfg.cameras)),
+        daemon=True,
+        name="calibration",
+    ).start()
 
     _running = True
     _worker  = threading.Thread(target=_processing_loop, daemon=True)
@@ -373,34 +419,16 @@ def _start_tracking(cfg: AppConfig):
 @app.on_event("startup")
 async def startup():
     MODEL_CACHE.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.environ["YOLO_CONFIG_DIR"] = str(MODEL_CACHE)
 
-    import os as _os
-    _os.environ["YOLO_CONFIG_DIR"] = str(MODEL_CACHE)
+    db.init()
+    cfg = db.load()
+    if not cfg.cameras:
+        log.info("No cameras in DB — starting with empty config (add via UI)")
 
-    env_has_cameras = bool(os.environ.get("CAM1_IP"))
-
-    if env_has_cameras:
-        log.info("ENV cameras detected — loading config from ENV (overrides saved config)")
-        cfg = config_from_env()
-        if CONFIG_PATH.exists():
-            try:
-                saved = load_cfg(CONFIG_PATH)
-                saved_zones = {c.id: c.zone_polygon_m for c in saved.cameras if c.zone_polygon_m}
-                for cam in cfg.cameras:
-                    if cam.id in saved_zones:
-                        cam.zone_polygon_m = saved_zones[cam.id]
-                log.info("Zone polygons merged from saved config")
-            except Exception as e:
-                log.warning(f"Could not merge zones from saved config: {e}")
-    elif CONFIG_PATH.exists():
-        log.info(f"Loading config from {CONFIG_PATH}")
-        cfg = load_cfg(CONFIG_PATH)
-    else:
-        log.info("No saved config and no ENV cameras — starting with empty config")
-        cfg = config_from_env()
-
-    _start_tracking(cfg)
+    threading.Thread(
+        target=_start_tracking, args=(cfg,), daemon=True, name="startup"
+    ).start()
 
 
 @app.on_event("shutdown")
@@ -444,10 +472,9 @@ class ConfigPayload(BaseModel):
 @app.post("/api/config")
 async def save_config(payload: ConfigPayload):
     data = payload.model_dump()
-    CONFIG_PATH.write_text(json.dumps(data, indent=2))
-    log.info("Config saved — reloading tracking...")
-
-    cfg = load_cfg(CONFIG_PATH)
+    cfg  = load_from_dict(data)
+    db.save(cfg)
+    log.info("Config saved to DB — reloading tracking...")
     threading.Thread(target=_start_tracking, args=(cfg,), daemon=True).start()
     return {"status": "ok", "cameras": len(cfg.cameras)}
 
@@ -455,6 +482,11 @@ async def save_config(payload: ConfigPayload):
 @app.get("/api/tracks")
 def get_tracks():
     return _latest
+
+
+@app.get("/api/capabilities")
+def get_capabilities():
+    return _cam_capabilities
 
 
 # ─── Manual PTZ control ───────────────────────────────────────────────────────
@@ -465,7 +497,7 @@ class PtzMoveBody(BaseModel):
 
 
 @app.post("/api/ptz/{camera_id}/move")
-def ptz_move(camera_id: str, body: PtzMoveBody):
+async def ptz_move(camera_id: str, body: PtzMoveBody):
     ctrl = _ptz.get(camera_id)
     if ctrl is None:
         return JSONResponse({"error": "no PTZ controller for this camera"}, status_code=404)
@@ -475,7 +507,7 @@ def ptz_move(camera_id: str, body: PtzMoveBody):
 
 
 @app.post("/api/ptz/{camera_id}/stop")
-def ptz_stop(camera_id: str):
+async def ptz_stop(camera_id: str):
     ctrl = _ptz.get(camera_id)
     if ctrl is None:
         return JSONResponse({"error": "no PTZ controller for this camera"}, status_code=404)
@@ -484,22 +516,111 @@ def ptz_stop(camera_id: str):
     return {"status": "ok"}
 
 
+@app.post("/api/ptz/{camera_id}/home/go")
+async def ptz_home_go(camera_id: str):
+    ctrl = _ptz.get(camera_id)
+    if ctrl is None:
+        return JSONResponse({"error": "no PTZ controller for this camera"}, status_code=404)
+    _manual_override[camera_id] = time.time()
+    ctrl.go_home()
+    return {"status": "ok"}
+
+
+@app.post("/api/ptz/{camera_id}/home/set")
+async def ptz_home_set(camera_id: str):
+    ctrl = _ptz.get(camera_id)
+    if ctrl is None:
+        return JSONResponse({"error": "no PTZ controller for this camera"}, status_code=404)
+    ctrl.set_home()
+    return {"status": "ok"}
+
+
+class TiltOffsetBody(BaseModel):
+    offset: float = 0.0
+
+
+@app.post("/api/ptz/{camera_id}/tilt_offset")
+async def ptz_tilt_offset(camera_id: str, body: TiltOffsetBody):
+    with _lock:
+        cfg = _config
+    if not cfg:
+        return JSONResponse({"error": "not initialized"}, status_code=503)
+    cam = next((c for c in cfg.cameras if c.id == camera_id), None)
+    if cam is None:
+        return JSONResponse({"error": "camera not found"}, status_code=404)
+    cam.ptz_tilt_offset = max(-0.49, min(0.49, body.offset))
+    ctrl = _ptz.get(camera_id)
+    if ctrl:
+        ctrl.cam.ptz_tilt_offset = cam.ptz_tilt_offset
+    db.save(cfg)
+    return {"status": "ok", "offset": cam.ptz_tilt_offset}
+
+
+# ─── Snapshot (single JPEG, short-lived request) ─────────────────────────────
+@app.get("/api/snapshot/{camera_id}")
+async def snapshot(camera_id: str):
+    phys_id, half = _split_id(camera_id)
+    if not _streams_sd:
+        return JSONResponse({"error": "not ready"}, status_code=503)
+    fr = _streams_sd.get_frame(phys_id)
+    if fr is None:
+        return JSONResponse({"error": "no frame"}, status_code=503)
+
+    img = fr.image.copy()
+    h, w = img.shape[:2]
+    mid  = h // 2
+
+    if half == "top":
+        img = img[:mid, :]
+        for det in _latest.get(camera_id, []):
+            _draw_det(img, det, color=(0, 208, 132))
+    elif half == "bot":
+        img = img[mid:, :]
+        for det in _latest.get(camera_id, []):
+            _draw_det(img, det, color=(245, 158, 11))
+    else:
+        cfg_s    = _config
+        phys_cam = next((c for c in cfg_s.cameras if c.id == phys_id), None) if cfg_s else None
+        if phys_cam and phys_cam.split_stream:
+            cv2.line(img, (0, mid), (w, mid), (40, 70, 55), 1)
+            cv2.putText(img, "FIXED", (5, 14),   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 208, 132), 1)
+            cv2.putText(img, "PTZ",   (5, mid+14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (245, 158, 11), 1)
+            for det in _latest.get(f"{phys_id}_top", []):
+                _draw_det(img, det, color=(0, 208, 132))
+            for det in _latest.get(f"{phys_id}_bot", []):
+                _draw_det(img, det, color=(245, 158, 11), offset_y=mid)
+        else:
+            for det in _latest.get(camera_id, []):
+                _draw_det(img, det)
+
+    ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    if not ok:
+        return JSONResponse({"error": "encode failed"}, status_code=500)
+
+    from fastapi.responses import Response
+    return Response(
+        jpg.tobytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 # ─── MJPEG streams ─────────────────────────────────────────────────────────────
 # Supports:
 #   /api/stream/{cam_id}        — full frame (split cameras: shows divider + both bboxes)
 #   /api/stream/{cam_id}_top    — top half with fixed-cam bboxes
 #   /api/stream/{cam_id}_bot    — bottom half with ptz-cam bboxes
 @app.get("/api/stream/{camera_id}")
-def mjpeg_stream(camera_id: str):
+async def mjpeg_stream(camera_id: str):
     phys_id, half = _split_id(camera_id)
 
-    def gen():
+    async def gen():
         while True:
             if not _streams_sd:
-                time.sleep(0.1); continue
+                await asyncio.sleep(0.1); continue
             fr = _streams_sd.get_frame(phys_id)
             if fr is None:
-                time.sleep(0.05); continue
+                await asyncio.sleep(0.05); continue
 
             img      = fr.image.copy()
             h, w     = img.shape[:2]
@@ -537,7 +658,7 @@ def mjpeg_stream(camera_id: str):
             if ok:
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
                        + jpg.tobytes() + b"\r\n")
-            time.sleep(1 / 15)
+            await asyncio.sleep(1 / 15)
 
     return StreamingResponse(
         gen(),

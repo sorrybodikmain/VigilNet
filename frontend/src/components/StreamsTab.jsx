@@ -2,8 +2,36 @@ import { styles } from "../styles.js";
 import { CAM_COLORS, STATE_COLOR } from "../constants.js";
 import { StateBadge } from "./ui.jsx";
 import { PtzJoystick } from "./PtzJoystick.jsx";
+import { StreamImg } from "./StreamImg.jsx";
 
-function SplitStreamCard({ cam, color, tracks, ptzState }) {
+function CapBadge({ caps }) {
+  if (!caps || caps.status === "n/a") return null;
+  const pending = caps.status === "pending";
+  const ptzOk   = caps.has_ptz;
+  const zoomOk  = caps.has_zoom;
+  return (
+    <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <span style={{
+        fontSize: 8, padding: "1px 5px", letterSpacing: 1,
+        border: `1px solid ${pending ? "#3a5262" : ptzOk ? "#00d08466" : "#ef444466"}`,
+        color:  pending ? "#3a5262" : ptzOk ? "#00d084" : "#ef4444",
+        background: pending ? "transparent" : ptzOk ? "#00d08411" : "#ef444411",
+      }}>
+        {pending ? "PTZ..." : ptzOk ? "PTZ ✓" : "PTZ ✗"}
+      </span>
+      <span style={{
+        fontSize: 8, padding: "1px 5px", letterSpacing: 1,
+        border: `1px solid ${pending ? "#3a5262" : zoomOk ? "#3b9ef566" : "#3a5262"}`,
+        color:  pending ? "#3a5262" : zoomOk ? "#3b9ef5" : "#3a5262",
+        background: zoomOk && !pending ? "#3b9ef511" : "transparent",
+      }}>
+        {pending ? "ZOOM..." : zoomOk ? "ZOOM ✓" : "ZOOM ✗"}
+      </span>
+    </span>
+  );
+}
+
+function SplitStreamCard({ cam, color, tracks, ptzState, caps }) {
   const topTracks = tracks[cam.id + "_top"] || [];
   const botTracks = tracks[cam.id + "_bot"] || [];
   const total     = topTracks.length + botTracks.length;
@@ -32,6 +60,7 @@ function SplitStreamCard({ cam, color, tracks, ptzState }) {
           {cam.type.toUpperCase()}
         </span>
         <StateBadge st={ptzState} inline/>
+        <CapBadge caps={caps}/>
         {total > 0 && (
           <span style={{ fontSize:10, color:"#ef4444", marginLeft:"auto" }}>
             ● {total} особ
@@ -50,12 +79,11 @@ function SplitStreamCard({ cam, color, tracks, ptzState }) {
               <span style={{ fontSize:9, color:"#ef4444", marginLeft:"auto" }}>● {topTracks.length}</span>
             )}
           </div>
-          <div style={{ position:"relative", background:"#040608", minHeight:140 }}>
-            <img
-              src={`/api/stream/${cam.id}_top`}
-              alt={`${cam.name} top`}
-              style={{ width:"100%", display:"block" }}
-              onError={e => { e.target.style.display = "none"; }}
+          <div style={{ position:"relative", background:"#040608", height:140 }}>
+            <StreamImg
+              camId={cam.id}
+              crop="top"
+              style={{ width:"100%", height:"100%" }}
             />
             {topTracks.length === 0 && (
               <div style={styles.streamNoTrack}>Очікування детекції...</div>
@@ -82,12 +110,11 @@ function SplitStreamCard({ cam, color, tracks, ptzState }) {
               <span style={{ fontSize:9, color:"#ef4444", marginLeft:"auto" }}>● {botTracks.length}</span>
             )}
           </div>
-          <div style={{ position:"relative", background:"#040608", minHeight:140 }}>
-            <img
-              src={`/api/stream/${cam.id}_bot`}
-              alt={`${cam.name} bot`}
-              style={{ width:"100%", display:"block" }}
-              onError={e => { e.target.style.display = "none"; }}
+          <div style={{ position:"relative", background:"#040608", height:140 }}>
+            <StreamImg
+              camId={cam.id}
+              crop="bot"
+              style={{ width:"100%", height:"100%" }}
             />
             {botTracks.length === 0 && (
               <div style={styles.streamNoTrack}>Очікування детекції...</div>
@@ -98,6 +125,7 @@ function SplitStreamCard({ cam, color, tracks, ptzState }) {
               camId={cam.id}
               isManual={ptzState?.manual}
               manualRemaining={ptzState?.manual_remaining}
+              hasZoom={caps?.has_zoom ?? true}
             />
           )}
           <div style={{ ...styles.streamFooter, borderTop:"1px solid #1a2535" }}>
@@ -116,7 +144,7 @@ function SplitStreamCard({ cam, color, tracks, ptzState }) {
   );
 }
 
-export function StreamsTab({ cameras, tracks, ptzStates }) {
+export function StreamsTab({ cameras, tracks, ptzStates, capabilities = {} }) {
   return (
     <div style={styles.streamsTab}>
       <div style={styles.camTabHeader}>
@@ -128,6 +156,7 @@ export function StreamsTab({ cameras, tracks, ptzStates }) {
         {cameras.map((cam, i) => {
           const color = CAM_COLORS[i % CAM_COLORS.length];
           const st    = ptzStates[cam.id];
+          const caps  = capabilities[cam.id];
 
           if (cam.split_stream) {
             return (
@@ -137,6 +166,7 @@ export function StreamsTab({ cameras, tracks, ptzStates }) {
                 color={color}
                 tracks={tracks}
                 ptzState={st}
+                caps={caps}
               />
             );
           }
@@ -151,6 +181,7 @@ export function StreamsTab({ cameras, tracks, ptzStates }) {
                   {cam.type.toUpperCase()}
                 </span>
                 <StateBadge st={st} inline/>
+                <CapBadge caps={caps}/>
                 {camTracks.length > 0 && (
                   <span style={{ fontSize:10, color:"#ef4444", marginLeft:"auto" }}>
                     ● {camTracks.length} особ
@@ -159,12 +190,7 @@ export function StreamsTab({ cameras, tracks, ptzStates }) {
               </div>
 
               <div style={styles.streamImgWrap}>
-                <img
-                  src={`/api/stream/${cam.id}`}
-                  alt={cam.name}
-                  style={styles.streamImg}
-                  onError={e => { e.target.style.display = "none"; }}
-                />
+                <StreamImg camId={cam.id} crop="full" style={styles.streamImg}/>
                 {camTracks.length === 0 && (
                   <div style={styles.streamNoTrack}>Очікування детекції...</div>
                 )}
@@ -175,6 +201,7 @@ export function StreamsTab({ cameras, tracks, ptzStates }) {
                   camId={cam.id}
                   isManual={st?.manual}
                   manualRemaining={st?.manual_remaining}
+                  hasZoom={caps?.has_zoom ?? true}
                 />
               )}
 

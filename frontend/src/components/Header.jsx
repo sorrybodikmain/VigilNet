@@ -15,7 +15,7 @@ export function Header({ tab, setTab, cameras, tracks, saving, onSave }) {
       </div>
 
       <nav style={styles.nav}>
-        {[["map","⬚  MAP"],["cameras","⊞  CAMERAS"],["streams","▶  STREAMS"],["export","⟨/⟩  EXPORT"]].map(([id,lbl]) => (
+        {[["map","⬚  MAP"],["cameras","⊞  CAMERAS"],["streams","▶  STREAMS"],["calibrate","⊕  CALIBRATE"],["export","⟨/⟩  EXPORT"]].map(([id,lbl]) => (
           <button key={id} onClick={() => setTab(id)}
             style={{ ...styles.navBtn, ...(tab === id ? styles.navBtnOn : {}) }}>
             {lbl}

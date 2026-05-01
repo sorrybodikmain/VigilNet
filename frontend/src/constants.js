@@ -1,6 +1,8 @@
 export const CANVAS_W = 800;
 export const CANVAS_H = 520;
 
+export const streamUrl = (camId) => `/api/stream/${camId}`;
+
 export const CAM_COLORS = [
   "#00d084","#3b9ef5","#f59e0b","#ef4444",
   "#a78bfa","#06b6d4","#f97316","#10b981",
@@ -45,6 +47,8 @@ export function makeCameraTemplate(idx, yardW, yardH) {
     position:   { x: yardW / 2, y: yardH / 2 },
     zone_polygon_m: [],
     zone: [],
-    ptz_limits: { ...DEFAULT_PTZ_LIMITS },
+    ptz_limits:      { ...DEFAULT_PTZ_LIMITS },
+    ptz_invert_pan:  false,
+    ptz_invert_tilt: false,
   };
 }

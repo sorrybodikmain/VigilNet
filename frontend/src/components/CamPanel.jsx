@@ -2,7 +2,7 @@ import { styles } from "../styles.js";
 import { STATE_COLOR } from "../constants.js";
 import { Fld } from "./ui.jsx";
 
-export function CamPanel({ cam, color, ptzState, onUpdate, onPtz, onDelete }) {
+export function CamPanel({ cam, color, ptzState, onUpdate, onPtz, onDelete, onPosition }) {
   const zone = cam.zone_polygon_m || cam.zone || [];
   const st   = ptzState;
 
@@ -55,6 +55,24 @@ export function CamPanel({ cam, color, ptzState, onUpdate, onPtz, onDelete }) {
           </span>
         )}
       </div>
+      <div style={styles.miniLabel}>POSITION (м)</div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+        {[["X","x"],["Y","y"]].map(([l, k]) => (
+          <div key={k}>
+            <div style={styles.miniLabel}>{l}</div>
+            <input
+              type="number" step="0.1"
+              value={(cam.position_m || cam.position)?.[k] ?? 0}
+              onChange={e => onPosition?.(
+                k === "x" ? parseFloat(e.target.value) || 0 : (cam.position_m || cam.position)?.x ?? 0,
+                k === "y" ? parseFloat(e.target.value) || 0 : (cam.position_m || cam.position)?.y ?? 0,
+              )}
+              style={{ ...styles.inp, textAlign:"center" }}
+            />
+          </div>
+        ))}
+      </div>
+
       <Fld label="IP">
         <input value={cam.ip} onChange={e => onUpdate("ip", e.target.value)} style={styles.inp}/>
       </Fld>
@@ -66,9 +84,29 @@ export function CamPanel({ cam, color, ptzState, onUpdate, onPtz, onDelete }) {
       </Fld>
 
       {cam.type === "ptz" && <>
-        <Fld label="ONVIF URL">
+        <Fld label="ONVIF URL (for DVRIP credentials)">
           <input value={cam.onvif_url || ""} onChange={e => onUpdate("onvif_url", e.target.value)} style={styles.inp}/>
         </Fld>
+
+        <div style={{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" }}>
+          <label style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer", userSelect:"none" }}>
+            <input
+              type="checkbox"
+              checked={cam.has_zoom === true}
+              onChange={e => onUpdate("has_zoom", e.target.checked ? true : null)}
+              style={{ accentColor:"#f59e0b", width:12, height:12 }}
+            />
+            <span style={{ fontSize:10, color:"#6a8292", letterSpacing:1 }}>HAS ZOOM</span>
+          </label>
+          {cam.has_zoom === null || cam.has_zoom === undefined ? (
+            <span style={{ fontSize:9, color:"#3a5262", letterSpacing:1 }}>AUTO-DETECT</span>
+          ) : cam.has_zoom ? (
+            <span style={{ fontSize:9, color:"#f59e0b", background:"#f59e0b15", border:"1px solid #f59e0b40", padding:"1px 6px", letterSpacing:1 }}>ZOOM ON</span>
+          ) : (
+            <span style={{ fontSize:9, color:"#3a5262", letterSpacing:1 }}>NO ZOOM</span>
+          )}
+        </div>
+
         <div style={styles.miniLabel}>PTZ LIMITS (°)</div>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
           {[["pan_min","Pan Min"],["pan_max","Pan Max"],["tilt_min","Tilt Min"],["tilt_max","Tilt Max"]].map(([k,l]) => (
