@@ -95,15 +95,15 @@ sudo systemctl restart docker
 
 ## API Reference
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/health` | GET | Health check |
-| `/api/config` | GET | Get current config |
-| `/api/config` | POST | Save new config |
-| `/api/cameras` | GET | List cameras |
-| `/api/tracks` | GET | Current tracking data |
-| `/api/stream/{id}` | GET | MJPEG stream with bounding boxes |
-| `/ws/tracks` | WS | Real-time tracking updates |
+| Endpoint           | Method | Description                      |
+| ------------------ | ------ | -------------------------------- |
+| `/api/health`      | GET    | Health check                     |
+| `/api/config`      | GET    | Get current config               |
+| `/api/config`      | POST   | Save new config                  |
+| `/api/cameras`     | GET    | List cameras                     |
+| `/api/tracks`      | GET    | Current tracking data            |
+| `/api/stream/{id}` | GET    | MJPEG stream with bounding boxes |
+| `/ws/tracks`       | WS     | Real-time tracking updates       |
 
 ## iCSee RTSP URL Format
 
@@ -130,10 +130,10 @@ model = torchreid.models.build_model("osnet_x0_25", num_classes=1)
 
 ## Docker Volumes
 
-| Volume | Contents |
-|---|---|
+| Volume            | Contents                                                  |
+| ----------------- | --------------------------------------------------------- |
 | `camtrack_config` | `camtrack_config.json` — camera zones and tracking config |
-| `camtrack_models` | YOLOv8 `.pt` model file (cached to avoid re-downloading) |
+| `camtrack_models` | YOLOv8 `.pt` model file (cached to avoid re-downloading)  |
 
 ## Logs
 
